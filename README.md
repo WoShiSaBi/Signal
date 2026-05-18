@@ -155,9 +155,21 @@ timeframe_sets:
     htf: H4
     mtf: H1
     ltf: M15
+    candles_to_fetch: 500
 ```
 
 Disable a set by changing `enabled` to `false`.
+
+You can restrict a symbol to only specific sets:
+
+```yaml
+symbols:
+  - name: XAUUSD
+    enabled: true
+    enabled_timeframe_sets:
+      - set_2
+      - set_3
+```
 
 ## 8. Run In CSV Mode
 
@@ -206,6 +218,10 @@ In `config.yaml`:
 ```yaml
 data:
   mode: mt5
+  daily_timeframe: D1
+
+  mt5:
+    fallback_to_csv_on_error: false
 ```
 
 Then run:
@@ -245,6 +261,62 @@ Main rule modules:
 - `strategies/mtf_fractal_ifvg.py`: full strategy orchestration.
 
 Configurable settings live in `config.yaml` under `strategy`.
+
+Useful config controls:
+
+```yaml
+strategy:
+  candles_to_fetch: 500
+  minimum_risk_reward: 2.0
+
+  pivots:
+    left_bars: 3
+    right_bars: 3
+
+  fvg:
+    merge_enabled: true
+    require_entry_fvg_opposes_sweep: true
+
+  scenarios:
+    mtf_override:
+      enabled: true
+      lookback_candles: 4
+
+    base_ltf:
+      enabled: true
+
+  invalidation:
+    scenario_3_enabled: true
+    minimum_rr_enabled: true
+
+  risk:
+    minimum_risk_reward: 2.0
+    entry_boundary: support_resistance
+    require_tp1: true
+
+    tp2:
+      enabled: true
+      source: previous_day
+```
+
+`entry_boundary` options:
+
+- `support_resistance`: BUY uses IFVG top, SELL uses IFVG bottom.
+- `midpoint`: entry at the middle of the IFVG zone.
+- `opposite_boundary`: BUY uses IFVG bottom, SELL uses IFVG top.
+
+Per-symbol strategy overrides are supported:
+
+```yaml
+symbols:
+  - name: XAUUSD
+    enabled: true
+    minimum_risk_reward: 2.5
+    strategy_overrides:
+      scenarios:
+        mtf_override:
+          lookback_candles: 5
+```
 
 ## 12. Duplicate Alerts
 

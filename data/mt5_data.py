@@ -24,9 +24,11 @@ class MT5DataProvider:
         self,
         logger: logging.Logger | None = None,
         symbol_aliases: dict[str, list[str]] | None = None,
+        log_fetches: bool = True,
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
         self.symbol_aliases = symbol_aliases or {}
+        self.log_fetches = log_fetches
         self.resolved_symbols: dict[str, str] = {}
         self.unavailable_symbols: set[str] = set()
         self.mt5 = None
@@ -120,7 +122,8 @@ class MT5DataProvider:
 
         df["time"] = pd.to_datetime(df["time"], unit="s")
         keep = ["time", "open", "high", "low", "close", "tick_volume"]
-        self.logger.info("Market data fetched from MT5: %s %s %s candles", mt5_symbol, timeframe, len(df))
+        if self.log_fetches:
+            self.logger.info("Market data fetched from MT5: %s %s %s candles", mt5_symbol, timeframe, len(df))
         return df[[column for column in keep if column in df.columns]]
 
 

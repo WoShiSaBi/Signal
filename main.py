@@ -12,9 +12,11 @@ from alerts.discord import DiscordWebhookAlert
 from alerts.telegram import TelegramAlert, format_signal_message
 from config_loader import (
     ConfigError,
+    get_candles_to_fetch,
     get_enabled_symbols,
     get_symbol_aliases,
     get_enabled_timeframe_sets,
+    get_strategy_settings,
     load_config,
     print_startup_config,
     validate_config,
@@ -30,14 +32,18 @@ from utils.time_utils import is_in_enabled_session
 def build_data_provider(config: dict, logger: logging.Logger):
     data_config = config.get("data", {})
     mode = str(data_config.get("mode", "csv")).lower()
+    log_fetches = bool(config.get("scanner", {}).get("log_market_data_fetch", True))
 
     if mode == "mt5":
-        provider = MT5DataProvider(logger, symbol_aliases=get_symbol_aliases(config))
+        provider = MT5DataProvider(logger, symbol_aliases=get_symbol_aliases(config), log_fetches=log_fetches)
         if not provider.connect():
+            if bool(data_config.get("mt5", {}).get("fallback_to_csv_on_error", False)):
+                logger.error("MT5 connection failed. Falling back to CSV mode.")
+                return CSVDataProvider(str(data_config.get("csv_folder", "sample_data")), logger, log_fetches)
             raise RuntimeError("MT5 mode selected but MT5 connection failed.")
         return provider
 
-    return CSVDataProvider(str(data_config.get("csv_folder", "sample_data")), logger)
+    return CSVDataProvider(str(data_config.get("csv_folder", "sample_data")), logger, log_fetches)
 
 
 def is_high_confidence_signal(signal: StrategySignal, channel_config: dict) -> bool:
@@ -92,6 +98,7 @@ def fetch_market_data(
     timeframe_set: TimeframeSet,
     candles_to_fetch: int,
     logger: logging.Logger,
+    daily_timeframe: str = "D1",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
     htf = provider.fetch_rates(symbol, timeframe_set.htf, candles_to_fetch)
     if htf.empty:
@@ -108,14 +115,13 @@ def fetch_market_data(
         logger.error("Skipping %s %s because LTF market data is empty.", symbol, timeframe_set.name)
         return None
 
-    daily = provider.fetch_rates(symbol, "D1", candles_to_fetch)
+    daily = provider.fetch_rates(symbol, daily_timeframe, candles_to_fetch)
     return htf, mtf, ltf, daily
 
 
 def scan_once(
     config: dict,
     provider,
-    strategy: MTFFractalIFVGStrategy,
     telegram: TelegramAlert,
     discord: DiscordWebhookAlert,
     duplicate_filter: DuplicateFilter,
@@ -126,13 +132,21 @@ def scan_once(
         return
 
     symbols = get_enabled_symbols(config)
-    timeframe_sets = get_enabled_timeframe_sets(config)
-    candles_to_fetch = int(config.get("strategy", {}).get("candles_to_fetch", 500))
     timezone_name = config.get("sessions", {}).get("timezone", "Asia/Singapore")
+    daily_timeframe = str(config.get("data", {}).get("daily_timeframe", "D1"))
+    log_wait_states = bool(config.get("scanner", {}).get("log_wait_states", True))
 
     for symbol in symbols:
+        timeframe_sets = get_enabled_timeframe_sets(config, symbol)
+        if not timeframe_sets:
+            logger.error("Skipping %s because no timeframe sets are enabled for this symbol.", symbol)
+            continue
+
+        strategy = MTFFractalIFVGStrategy(get_strategy_settings(config, symbol), logger)
+
         for timeframe_set in timeframe_sets:
-            bundle = fetch_market_data(provider, symbol, timeframe_set, candles_to_fetch, logger)
+            candles_to_fetch = get_candles_to_fetch(config, timeframe_set.name)
+            bundle = fetch_market_data(provider, symbol, timeframe_set, candles_to_fetch, logger, daily_timeframe)
             if bundle is None:
                 continue
 
@@ -140,7 +154,8 @@ def scan_once(
             signal = strategy.analyze(symbol, timeframe_set, htf, mtf, ltf, daily)
 
             if signal.signal == "WAIT":
-                logger.info("%s %s: WAIT - %s", symbol, timeframe_set.name, "; ".join(signal.reason))
+                if log_wait_states:
+                    logger.info("%s %s: WAIT - %s", symbol, timeframe_set.name, "; ".join(signal.reason))
             elif signal.signal == "INVALIDATED":
                 logger.info("%s %s: INVALIDATED - %s", symbol, timeframe_set.name, signal.invalidation_reason)
             else:
@@ -204,7 +219,6 @@ def run_bot(config_path: str, run_once: bool = False) -> int:
         logger.error("%s", exc)
         return 1
 
-    strategy = MTFFractalIFVGStrategy(config.get("strategy", {}), logger)
     telegram = TelegramAlert(bool(config.get("telegram", {}).get("enabled", True)), logger)
     discord_config = config.get("discord", {})
     discord = DiscordWebhookAlert(
@@ -222,7 +236,7 @@ def run_bot(config_path: str, run_once: bool = False) -> int:
 
     try:
         while True:
-            scan_once(config, provider, strategy, telegram, discord, duplicate_filter, logger)
+            scan_once(config, provider, telegram, discord, duplicate_filter, logger)
             if run_once:
                 break
             time.sleep(scan_interval)

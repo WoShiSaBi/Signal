@@ -65,11 +65,28 @@ class MTFFractalIFVGStrategy:
     def __init__(self, settings: dict, logger: logging.Logger | None = None) -> None:
         self.settings = settings
         self.logger = logger or logging.getLogger(__name__)
-        self.left = int(settings.get("pivot_left_bars", 3))
-        self.right = int(settings.get("pivot_right_bars", 3))
-        self.merge_enabled = bool(settings.get("fvg_merge_enabled", True))
-        self.override_lookback = int(settings.get("mtf_override_lookback_candles", 4))
-        self.minimum_rr = float(settings.get("minimum_risk_reward", 2.0))
+        pivots = settings.get("pivots", {})
+        fvg = settings.get("fvg", {})
+        scenarios = settings.get("scenarios", {})
+        override = scenarios.get("mtf_override", {}) if isinstance(scenarios, dict) else {}
+        base_ltf = scenarios.get("base_ltf", {}) if isinstance(scenarios, dict) else {}
+        invalidation = settings.get("invalidation", {})
+        risk = settings.get("risk", {})
+        liquidity_sweep = settings.get("liquidity_sweep", {})
+
+        self.left = int(pivots.get("left_bars", settings.get("pivot_left_bars", 3)))
+        self.right = int(pivots.get("right_bars", settings.get("pivot_right_bars", 3)))
+        self.merge_enabled = bool(fvg.get("merge_enabled", settings.get("fvg_merge_enabled", True)))
+        self.require_entry_fvg_opposes_sweep = bool(fvg.get("require_entry_fvg_opposes_sweep", True))
+        self.liquidity_sweep_enabled = bool(liquidity_sweep.get("enabled", True))
+        self.override_enabled = bool(override.get("enabled", True))
+        self.base_ltf_enabled = bool(base_ltf.get("enabled", True))
+        self.override_lookback = int(override.get("lookback_candles", settings.get("mtf_override_lookback_candles", 4)))
+        self.scenario_3_enabled = bool(invalidation.get("scenario_3_enabled", True))
+        self.minimum_rr_enabled = bool(invalidation.get("minimum_rr_enabled", True))
+        self.risk_settings = risk if isinstance(risk, dict) else {}
+        self.minimum_rr = float(self.risk_settings.get("minimum_risk_reward", settings.get("minimum_risk_reward", 2.0)))
+        self.require_tp1 = bool(self.risk_settings.get("require_tp1", True))
 
     def analyze(
         self,
@@ -117,6 +134,11 @@ class MTFFractalIFVGStrategy:
             matching = mtf.index[pd.to_datetime(mtf["time"]) >= htf_touch_time].tolist()
             mtf_start_index = matching[0] if matching else None
 
+        if not self.liquidity_sweep_enabled:
+            signal = self._wait(symbol, timeframe_set, "Liquidity sweep confirmation is disabled in config.")
+            signal.htf_fvg = htf_fvg
+            return signal
+
         sweep = latest_sweep_after_index(mtf, mtf_start_index, self.left, self.right)
         if sweep is None:
             signal = self._wait(symbol, timeframe_set, "HTF FVG respected. Waiting for MTF liquidity sweep.")
@@ -133,15 +155,19 @@ class MTFFractalIFVGStrategy:
         )
 
         trade_direction = sweep.signal_direction
-        required_fvg_direction = "bearish" if trade_direction == "BUY" else "bullish"
+        required_fvg_direction = None
+        if self.require_entry_fvg_opposes_sweep:
+            required_fvg_direction = "bearish" if trade_direction == "BUY" else "bullish"
 
-        override_fvgs = find_fvgs_before_index(
-            mtf,
-            sweep.candle_index,
-            self.override_lookback,
-            direction=required_fvg_direction,
-            merge_enabled=self.merge_enabled,
-        )
+        override_fvgs = []
+        if self.override_enabled:
+            override_fvgs = find_fvgs_before_index(
+                mtf,
+                sweep.candle_index,
+                self.override_lookback,
+                direction=required_fvg_direction,
+                merge_enabled=self.merge_enabled,
+            )
 
         if override_fvgs:
             self.logger.info("%s %s: Scenario 1 MTF Override detected", symbol, timeframe_set.name)
@@ -152,6 +178,14 @@ class MTFFractalIFVGStrategy:
             ifvg_timeframe = timeframe_set.mtf
             scenario_reason = "MTF override FVG found before the sweep."
         else:
+            if not self.base_ltf_enabled:
+                signal = self._wait(symbol, timeframe_set, "Base LTF strategy is disabled in config.")
+                signal.htf_fvg = htf_fvg
+                signal.mtf_sweep = sweep
+                signal.direction = trade_direction
+                signal.scenario = "Base LTF Strategy Disabled"
+                return signal
+
             self.logger.info("%s %s: Base LTF Strategy selected", symbol, timeframe_set.name)
             ltf_fvgs = find_fvgs_from_time(
                 ltf,
@@ -193,7 +227,11 @@ class MTFFractalIFVGStrategy:
             ifvg.disrespected_at_time,
         )
 
-        provisional_entry = entry_from_ifvg(ifvg, trade_direction)
+        provisional_entry = entry_from_ifvg(
+            ifvg,
+            trade_direction,
+            str(self.risk_settings.get("entry_boundary", "support_resistance")),
+        )
         tp1 = nearest_liquidity_target(
             trade_df,
             trade_direction,
@@ -204,7 +242,17 @@ class MTFFractalIFVGStrategy:
         )
         disrespect_candle = trade_df.iloc[disrespect_index]
 
-        if disrespect_candle_touches_target(disrespect_candle, trade_direction, tp1):
+        if self.require_tp1 and tp1 is None:
+            invalid = self._invalid(symbol, timeframe_set, "No valid TP1 liquidity target found.")
+            invalid.scenario = scenario
+            invalid.direction = trade_direction
+            invalid.htf_fvg = htf_fvg
+            invalid.mtf_sweep = sweep
+            invalid.ifvg = ifvg
+            invalid.setup_timestamp = ifvg.disrespected_at_time
+            return invalid
+
+        if self.scenario_3_enabled and disrespect_candle_touches_target(disrespect_candle, trade_direction, tp1):
             invalid = self._invalid(
                 symbol,
                 timeframe_set,
@@ -228,9 +276,10 @@ class MTFFractalIFVGStrategy:
             self.left,
             self.right,
             disrespect_index,
+            self.risk_settings,
         )
 
-        if risk.risk_reward is None or risk.risk_reward < self.minimum_rr:
+        if self.minimum_rr_enabled and (risk.risk_reward is None or risk.risk_reward < self.minimum_rr):
             invalid = self._invalid(
                 symbol,
                 timeframe_set,

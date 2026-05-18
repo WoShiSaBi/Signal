@@ -19,7 +19,13 @@ class RiskPlan:
     management: str
 
 
-def entry_from_ifvg(ifvg: FVG, direction: str) -> float:
+def entry_from_ifvg(ifvg: FVG, direction: str, boundary_mode: str = "support_resistance") -> float:
+    if boundary_mode == "midpoint":
+        return (float(ifvg.top) + float(ifvg.bottom)) / 2
+
+    if boundary_mode == "opposite_boundary":
+        return float(ifvg.bottom) if direction == "BUY" else float(ifvg.top)
+
     if direction == "BUY":
         return float(ifvg.top)
     return float(ifvg.bottom)
@@ -88,8 +94,15 @@ def build_risk_plan(
     left_bars: int,
     right_bars: int,
     disrespect_index: int | None,
+    risk_settings: dict | None = None,
 ) -> RiskPlan:
-    entry = entry_from_ifvg(ifvg, direction)
+    risk_settings = risk_settings or {}
+    entry_boundary = str(risk_settings.get("entry_boundary", "support_resistance"))
+    tp2_settings = risk_settings.get("tp2", {})
+    if not isinstance(tp2_settings, dict):
+        tp2_settings = {}
+
+    entry = entry_from_ifvg(ifvg, direction, entry_boundary)
     hard_sl = hard_stop_from_sweep(sweep, direction)
     tp1 = nearest_liquidity_target(
         trade_df,
@@ -99,7 +112,9 @@ def build_risk_plan(
         right_bars,
         before_index=disrespect_index,
     )
-    tp2 = previous_day_extreme(daily_df, direction, entry)
+    tp2_enabled = bool(tp2_settings.get("enabled", True))
+    tp2_source = str(tp2_settings.get("source", "previous_day"))
+    tp2 = previous_day_extreme(daily_df, direction, entry) if tp2_enabled and tp2_source == "previous_day" else None
     rr = calculate_rr(direction, entry, hard_sl, tp1)
     management = (
         "Close 50% at TP1, move SL to breakeven after TP1, close remaining 50% at TP2."

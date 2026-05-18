@@ -1,18 +1,37 @@
 symbols:
   - name: XAUUSD
     enabled: true
+    broker_symbol: XAUUSD
+    aliases:
+      - XAUUSD.a
+      - XAUUSDm
+    enabled_timeframe_sets:
+      - set_1
+      - set_2
+      - set_3
+
   - name: EURUSD
     enabled: true
+
   - name: GBPUSD
     enabled: true
+
   - name: USDJPY
     enabled: true
+
   - name: GBPJPY
     enabled: false
+
   - name: US30
     enabled: true
-  - name : BTCUSD
+
+  - name: BTCUSD
     enabled: true
+    aliases:
+      - BTCUSD
+      - BTCUSD.a
+      - BTCUSDm
+
   - name: NAS100
     enabled: true
     broker_symbol: USTEC
@@ -29,45 +48,81 @@ timeframe_sets:
     htf: D1
     mtf: H4
     ltf: H1
+    candles_to_fetch: 500
 
   set_2:
     enabled: true
     htf: H4
     mtf: H1
     ltf: M15
+    candles_to_fetch: 500
 
   set_3:
     enabled: true
     htf: H1
     mtf: M15
     ltf: M5
+    candles_to_fetch: 500
 
 telegram:
   enabled: true
+  high_confidence_only: false
+  minimum_risk_reward: 2.0
+  require_complete_trade_plan: true
   send_wait_alerts: false
   send_invalidated_alerts: true
 
 discord:
   enabled: true
   username: MTF IFVG Bot
-  high_confidence_only: false
-  minimum_risk_reward: 0.5
+  high_confidence_only: true
+  minimum_risk_reward: 2.0
   require_complete_trade_plan: true
-  send_wait_alerts: true
+  send_wait_alerts: false
   send_invalidated_alerts: false
 
 scanner:
   scan_interval_seconds: 60
   max_alerts_per_symbol_per_hour: 3
   duplicate_cooldown_minutes: 30
+  log_wait_states: true
+  log_market_data_fetch: true
 
 strategy:
-  minimum_risk_reward: 2.0
-  pivot_left_bars: 3
-  pivot_right_bars: 3
-  fvg_merge_enabled: true
-  mtf_override_lookback_candles: 4
   candles_to_fetch: 500
+  minimum_risk_reward: 2.0
+
+  pivots:
+    left_bars: 3
+    right_bars: 3
+
+  fvg:
+    merge_enabled: true
+    require_entry_fvg_opposes_sweep: true
+
+  liquidity_sweep:
+    enabled: true
+
+  scenarios:
+    mtf_override:
+      enabled: true
+      lookback_candles: 4
+
+    base_ltf:
+      enabled: true
+
+  invalidation:
+    scenario_3_enabled: true
+    minimum_rr_enabled: true
+
+  risk:
+    minimum_risk_reward: 2.0
+    entry_boundary: support_resistance
+    require_tp1: true
+
+    tp2:
+      enabled: true
+      source: previous_day
 
 sessions:
   timezone: Asia/Singapore
@@ -90,3 +145,7 @@ sessions:
 data:
   mode: mt5
   csv_folder: sample_data
+  daily_timeframe: D1
+
+  mt5:
+    fallback_to_csv_on_error: false

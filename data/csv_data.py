@@ -7,9 +7,15 @@ import pandas as pd
 
 
 class CSVDataProvider:
-    def __init__(self, csv_folder: str = "sample_data", logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        csv_folder: str = "sample_data",
+        logger: logging.Logger | None = None,
+        log_fetches: bool = True,
+    ) -> None:
         self.csv_folder = Path(csv_folder)
         self.logger = logger or logging.getLogger(__name__)
+        self.log_fetches = log_fetches
 
     def fetch_rates(self, symbol: str, timeframe: str, count: int = 500) -> pd.DataFrame:
         candidates = [
@@ -44,5 +50,6 @@ class CSVDataProvider:
 
         columns = [column for column in ["time", "open", "high", "low", "close", "tick_volume"] if column in df.columns]
         df = df[columns].tail(count).copy()
-        self.logger.info("Market data fetched from CSV: %s %s %s candles", symbol, timeframe, len(df))
+        if self.log_fetches:
+            self.logger.info("Market data fetched from CSV: %s %s %s candles", symbol, timeframe, len(df))
         return df
