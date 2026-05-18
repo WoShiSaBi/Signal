@@ -1,0 +1,92 @@
+symbols:
+  - name: XAUUSD
+    enabled: true
+  - name: EURUSD
+    enabled: true
+  - name: GBPUSD
+    enabled: true
+  - name: USDJPY
+    enabled: true
+  - name: GBPJPY
+    enabled: false
+  - name: US30
+    enabled: true
+  - name : BTCUSD
+    enabled: true
+  - name: NAS100
+    enabled: true
+    broker_symbol: USTEC
+    aliases:
+      - USTEC
+      - USTEC.cash
+      - US100
+      - NAS100.cash
+      - NAS100m
+
+timeframe_sets:
+  set_1:
+    enabled: true
+    htf: D1
+    mtf: H4
+    ltf: H1
+
+  set_2:
+    enabled: true
+    htf: H4
+    mtf: H1
+    ltf: M15
+
+  set_3:
+    enabled: true
+    htf: H1
+    mtf: M15
+    ltf: M5
+
+telegram:
+  enabled: true
+  send_wait_alerts: false
+  send_invalidated_alerts: true
+
+discord:
+  enabled: true
+  username: MTF IFVG Bot
+  high_confidence_only: false
+  minimum_risk_reward: 0.5
+  require_complete_trade_plan: true
+  send_wait_alerts: true
+  send_invalidated_alerts: false
+
+scanner:
+  scan_interval_seconds: 60
+  max_alerts_per_symbol_per_hour: 3
+  duplicate_cooldown_minutes: 30
+
+strategy:
+  minimum_risk_reward: 2.0
+  pivot_left_bars: 3
+  pivot_right_bars: 3
+  fvg_merge_enabled: true
+  mtf_override_lookback_candles: 4
+  candles_to_fetch: 500
+
+sessions:
+  timezone: Asia/Singapore
+
+  asian:
+    enabled: true
+    start: "07:00"
+    end: "15:00"
+
+  london:
+    enabled: true
+    start: "15:00"
+    end: "23:00"
+
+  new_york:
+    enabled: true
+    start: "20:00"
+    end: "04:00"
+
+data:
+  mode: mt5
+  csv_folder: sample_data

@@ -1,0 +1,7 @@
+pandas
+numpy
+MetaTrader5
+python-dotenv
+requests
+pytz
+PyYAML
