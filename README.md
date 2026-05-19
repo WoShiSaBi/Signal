@@ -277,6 +277,12 @@ strategy:
     merge_enabled: true
     require_entry_fvg_opposes_sweep: true
 
+  filters:
+    # HTF-only gap-size filter. 0 disables it.
+    # pip_size auto: Forex=0.0001, JPY pairs=0.01, XAU/XAG=0.1, other symbols=1.0.
+    min_htf_fvg_pips: 50
+    pip_size: auto
+
   scenarios:
     mtf_override:
       enabled: true
@@ -312,11 +318,15 @@ symbols:
   - name: XAUUSD
     enabled: true
     minimum_risk_reward: 2.5
+    min_htf_fvg_pips: 80
+    pip_size: 0.1
     strategy_overrides:
       scenarios:
         mtf_override:
           lookback_candles: 5
 ```
+
+`min_htf_fvg_pips` applies only to the HTF FVG. If the latest HTF FVG is smaller than this value, the bot stops before MTF/LTF confirmation. You can set it globally under top-level `filters`, directly on a symbol, or under `strategy_overrides.filters` for a symbol.
 
 ## 12. Duplicate Alerts
 

@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-echo Sending Telegram test message...
+echo Sending formatted Telegram signal test...
 echo.
 python test_telegram.py
 echo.

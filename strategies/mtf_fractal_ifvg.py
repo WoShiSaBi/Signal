@@ -94,6 +94,9 @@ class MTFFractalIFVGStrategy:
         liquidity_sweep = settings.get("liquidity_sweep", {})
         trend_filter = settings.get("trend_filter", {})
         confluence = settings.get("confluence", {})
+        filters = settings.get("filters", {})
+        if not isinstance(filters, dict):
+            filters = {}
 
         self.left = int(pivots.get("left_bars", settings.get("pivot_left_bars", 3)))
         self.right = int(pivots.get("right_bars", settings.get("pivot_right_bars", 3)))
@@ -115,6 +118,8 @@ class MTFFractalIFVGStrategy:
         self.trend_fast_period = int(self.trend_filter.get("fast_period", 50))
         self.trend_slow_period = int(self.trend_filter.get("slow_period", 200))
         self.high_rr_threshold = float(confluence.get("high_rr_threshold", 3.0)) if isinstance(confluence, dict) else 3.0
+        self.min_htf_fvg_pips = float(filters.get("min_htf_fvg_pips", 0) or 0)
+        self.pip_size_setting = filters.get("pip_size", "auto")
 
     def analyze(
         self,
@@ -134,8 +139,43 @@ class MTFFractalIFVGStrategy:
             return self._invalid(symbol, timeframe_set, f"Data error: {exc}")
 
         htf_fvg, htf_touch_index = find_latest_respected_fvg(htf, self.merge_enabled)
+        if htf_fvg is not None and self.min_htf_fvg_pips > 0:
+            htf_fvg_pips = self._fvg_size_pips(symbol, htf_fvg)
+            if htf_fvg_pips < self.min_htf_fvg_pips:
+                self.logger.info(
+                    "%s %s: HTF FVG ignored because size %.2f pips is below minimum %.2f pips: %s %.5f-%.5f",
+                    symbol,
+                    timeframe_set.name,
+                    htf_fvg_pips,
+                    self.min_htf_fvg_pips,
+                    htf_fvg.direction,
+                    htf_fvg.bottom,
+                    htf_fvg.top,
+                )
+                return self._wait(
+                    symbol,
+                    timeframe_set,
+                    (
+                        "No trade: HTF FVG size filter blocked the setup. "
+                        f"Gap size is {htf_fvg_pips:.2f} pips, minimum is {self.min_htf_fvg_pips:.2f} pips "
+                        f"({_fmt_zone(htf_fvg)})."
+                    ),
+                )
+
         if htf_fvg is None:
             latest_htf_fvg = find_latest_fvg_review(htf, self.merge_enabled)
+            if latest_htf_fvg is not None and self.min_htf_fvg_pips > 0:
+                latest_htf_fvg_pips = self._fvg_size_pips(symbol, latest_htf_fvg)
+                if latest_htf_fvg_pips < self.min_htf_fvg_pips:
+                    return self._wait(
+                        symbol,
+                        timeframe_set,
+                        (
+                            "No trade: latest HTF FVG was ignored by the size filter. "
+                            f"Gap size is {latest_htf_fvg_pips:.2f} pips, minimum is "
+                            f"{self.min_htf_fvg_pips:.2f} pips ({_fmt_zone(latest_htf_fvg)})."
+                        ),
+                    )
             if latest_htf_fvg and latest_htf_fvg.status == "invalidated":
                 self.logger.info(
                     "%s %s: HTF FVG invalidated: %s %.5f-%.5f",
@@ -480,6 +520,38 @@ class MTFFractalIFVGStrategy:
     @staticmethod
     def _direction_from_htf_fvg(htf_fvg: FVG) -> str:
         return "BUY" if htf_fvg.direction == "bullish" else "SELL"
+
+    def _fvg_size_pips(self, symbol: str, fvg: FVG) -> float:
+        return abs(fvg.top - fvg.bottom) / self._pip_size(symbol)
+
+    def _pip_size(self, symbol: str) -> float:
+        configured = self.pip_size_setting
+        if configured is not None and str(configured).lower() != "auto":
+            return float(configured)
+
+        normalized = "".join(character for character in symbol.upper() if character.isalnum())
+        if normalized.startswith(("XAU", "XAG")):
+            return 0.1
+
+        fiat_codes = {
+            "AUD",
+            "CAD",
+            "CHF",
+            "EUR",
+            "GBP",
+            "JPY",
+            "NZD",
+            "USD",
+        }
+        base = normalized[:3]
+        quote = normalized[3:6]
+        is_standard_forex_pair = base in fiat_codes and quote in fiat_codes
+        if is_standard_forex_pair and quote == "JPY":
+            return 0.01
+        if is_standard_forex_pair:
+            return 0.0001
+
+        return 1.0
 
     @staticmethod
     def _is_untapped_htf_fvg(htf_df: pd.DataFrame, htf_fvg: FVG, touch_index: int | None) -> bool:

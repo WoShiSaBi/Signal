@@ -41,6 +41,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "filters": {
         "enforce_htf_priority": True,
+        "min_htf_fvg_pips": 0,
+        "pip_size": "auto",
     },
     "strategy": {
         "minimum_risk_reward": 2.0,
@@ -65,6 +67,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "liquidity_sweep": {
             "enabled": True,
+        },
+        "filters": {
+            "min_htf_fvg_pips": 0,
+            "pip_size": "auto",
         },
         "scenarios": {
             "mtf_override": {
@@ -215,11 +221,31 @@ def get_strategy_settings(config: dict[str, Any], symbol: str | None = None) -> 
     if not isinstance(settings, dict):
         settings = {}
 
+    global_filters = config.get("filters", {})
+    if isinstance(global_filters, dict):
+        strategy_filter_keys = {"min_htf_fvg_pips", "pip_size"}
+        strategy_filters = {
+            key: global_filters[key]
+            for key in strategy_filter_keys
+            if key in global_filters
+        }
+        if strategy_filters:
+            settings = deep_merge(settings, {"filters": strategy_filters})
+
     if symbol:
         symbol_settings = get_symbol_settings(config, symbol)
         overrides = symbol_settings.get("strategy_overrides", {})
         if isinstance(overrides, dict):
             settings = deep_merge(settings, overrides)
+
+        symbol_filter_keys = {"min_htf_fvg_pips", "pip_size"}
+        symbol_filters = {
+            key: symbol_settings[key]
+            for key in symbol_filter_keys
+            if key in symbol_settings
+        }
+        if symbol_filters:
+            settings = deep_merge(settings, {"filters": symbol_filters})
 
         if "minimum_risk_reward" in symbol_settings:
             settings = deep_merge(
@@ -242,6 +268,15 @@ def validate_config(config: dict[str, Any]) -> None:
 
     if not enabled_sets:
         raise ConfigError("No timeframe sets are enabled. Enable at least one timeframe set in config.yaml.")
+
+    filters = config.get("filters", {})
+    if isinstance(filters, dict):
+        min_htf_fvg_pips = float(filters.get("min_htf_fvg_pips", 0))
+        if min_htf_fvg_pips < 0:
+            raise ConfigError("filters.min_htf_fvg_pips must be 0 or greater.")
+        pip_size = filters.get("pip_size", "auto")
+        if str(pip_size).lower() != "auto" and float(pip_size) <= 0:
+            raise ConfigError("filters.pip_size must be 'auto' or a positive number.")
 
     mode = str(config.get("data", {}).get("mode", "csv")).lower()
     if mode not in {"mt5", "csv"}:

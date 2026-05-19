@@ -91,6 +91,10 @@ scanner:
 
 filters:
   enforce_htf_priority: true
+  # HTF-only FVG size filter. 0 disables it.
+  # pip_size auto: Forex=0.0001, JPY pairs=0.01, XAU/XAG=0.1, other symbols=1.0.
+  min_htf_fvg_pips: 0
+  pip_size: auto
 
 strategy:
   candles_to_fetch: 500
