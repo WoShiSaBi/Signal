@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from alerts.discord import DiscordWebhookAlert
+from alerts.telegram import TelegramAlert
 from utils.env import load_project_env
 from utils.logger import setup_logger
 
@@ -10,21 +10,21 @@ from utils.logger import setup_logger
 def main() -> int:
     load_project_env()
     logger = setup_logger("logs/bot.log")
-    discord = DiscordWebhookAlert(enabled=True, username="MTF IFVG Bot", logger=logger)
+    telegram = TelegramAlert(enabled=True, logger=logger)
 
     message = f"""MTF FRACTAL IFVG BOT TEST
 
-Discord webhook is connected.
+Telegram bot is connected.
 This is only a test message.
 
 Timestamp UTC: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}
 """
 
-    if discord.send(message):
-        print("Discord test message sent.")
+    if telegram.send(message):
+        print("Telegram test message sent.")
         return 0
 
-    print("Discord test failed. Check DISCORD_WEBHOOK_URL in .env and logs/bot.log.")
+    print("Telegram test failed. Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env and logs/bot.log.")
     return 1
 
 

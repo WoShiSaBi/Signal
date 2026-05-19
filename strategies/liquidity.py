@@ -87,8 +87,11 @@ def latest_sweep_after_index(
     start_index: int | None,
     left_bars: int = 3,
     right_bars: int = 3,
+    signal_direction: str | None = None,
 ) -> LiquiditySweep | None:
     sweeps = detect_liquidity_sweeps(df, left_bars, right_bars)
     if start_index is not None:
         sweeps = [sweep for sweep in sweeps if sweep.candle_index >= start_index]
+    if signal_direction:
+        sweeps = [sweep for sweep in sweeps if sweep.signal_direction == signal_direction]
     return sweeps[-1] if sweeps else None

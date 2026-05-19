@@ -13,6 +13,8 @@ from strategies.fvg import (
     find_ifvg_disrespect,
     find_latest_fvg_review,
     find_latest_respected_fvg,
+    first_zone_touch_index,
+    has_disrespect_close,
 )
 from strategies.liquidity import LiquiditySweep, latest_sweep_after_index
 from strategies.pivots import normalize_ohlc
@@ -68,6 +70,9 @@ class StrategySignal:
     risk_reward: float | None = None
     reason: list[str] = field(default_factory=list)
     invalidation_reason: str | None = None
+    confluence_score: int = 0
+    confluence_total: int = 0
+    confluence_factors: list[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.utcnow)
     setup_timestamp: pd.Timestamp | None = None
 
@@ -87,11 +92,14 @@ class MTFFractalIFVGStrategy:
         invalidation = settings.get("invalidation", {})
         risk = settings.get("risk", {})
         liquidity_sweep = settings.get("liquidity_sweep", {})
+        trend_filter = settings.get("trend_filter", {})
+        confluence = settings.get("confluence", {})
 
         self.left = int(pivots.get("left_bars", settings.get("pivot_left_bars", 3)))
         self.right = int(pivots.get("right_bars", settings.get("pivot_right_bars", 3)))
         self.merge_enabled = bool(fvg.get("merge_enabled", settings.get("fvg_merge_enabled", True)))
         self.require_entry_fvg_opposes_sweep = bool(fvg.get("require_entry_fvg_opposes_sweep", True))
+        self.untapped_htf_fvg_mode = str(fvg.get("untapped_htf_fvg_mode", "bonus")).lower()
         self.liquidity_sweep_enabled = bool(liquidity_sweep.get("enabled", True))
         self.override_enabled = bool(override.get("enabled", True))
         self.base_ltf_enabled = bool(base_ltf.get("enabled", True))
@@ -101,6 +109,12 @@ class MTFFractalIFVGStrategy:
         self.risk_settings = risk if isinstance(risk, dict) else {}
         self.minimum_rr = float(self.risk_settings.get("minimum_risk_reward", settings.get("minimum_risk_reward", 2.0)))
         self.require_tp1 = bool(self.risk_settings.get("require_tp1", True))
+        self.trend_filter = trend_filter if isinstance(trend_filter, dict) else {}
+        self.trend_filter_enabled = bool(self.trend_filter.get("enabled", True))
+        self.trend_strict_requirement = bool(self.trend_filter.get("strict_requirement", False))
+        self.trend_fast_period = int(self.trend_filter.get("fast_period", 50))
+        self.trend_slow_period = int(self.trend_filter.get("slow_period", 200))
+        self.high_rr_threshold = float(confluence.get("high_rr_threshold", 3.0)) if isinstance(confluence, dict) else 3.0
 
     def analyze(
         self,
@@ -159,7 +173,50 @@ class MTFFractalIFVGStrategy:
             htf_fvg.top,
         )
 
+        invalidated, invalidated_index = has_disrespect_close(htf, htf_fvg)
+        if invalidated:
+            invalid_time = pd.Timestamp(htf.iloc[invalidated_index]["time"]) if invalidated_index is not None else None
+            return self._invalid(
+                symbol,
+                timeframe_set,
+                (
+                    "No trade: HTF FVG disrespect invalidation. An HTF candle closed beyond the FVG zone "
+                    f"({_fmt_zone(htf_fvg)}) at {_fmt_time(invalid_time)}."
+                ),
+            )
+
+        trade_direction = self._direction_from_htf_fvg(htf_fvg)
         htf_touch_time = pd.Timestamp(htf.iloc[htf_touch_index]["time"]) if htf_touch_index is not None else None
+        is_untapped_htf_fvg = self._is_untapped_htf_fvg(htf, htf_fvg, htf_touch_index)
+        htf_fvg.metadata["is_untapped"] = is_untapped_htf_fvg
+
+        if self.untapped_htf_fvg_mode in {"require", "required", "strict", "requirement"} and not is_untapped_htf_fvg:
+            signal = self._wait(
+                symbol,
+                timeframe_set,
+                (
+                    "No trade: HTF FVG is not virgin/untapped before the current setup touch "
+                    f"({_fmt_zone(htf_fvg)})."
+                ),
+            )
+            signal.htf_fvg = htf_fvg
+            signal.direction = trade_direction
+            return signal
+
+        htf_trend = self._trend_direction(htf)
+        if self.trend_filter_enabled and self.trend_strict_requirement and htf_trend != trade_direction:
+            signal = self._wait(
+                symbol,
+                timeframe_set,
+                (
+                    "No trade: HTF trend alignment is required, but trend is "
+                    f"{htf_trend or 'unknown'} while setup bias is {trade_direction}."
+                ),
+            )
+            signal.htf_fvg = htf_fvg
+            signal.direction = trade_direction
+            return signal
+
         mtf_start_index = None
         if htf_touch_time is not None:
             matching = mtf.index[pd.to_datetime(mtf["time"]) >= htf_touch_time].tolist()
@@ -170,17 +227,25 @@ class MTFFractalIFVGStrategy:
             signal.htf_fvg = htf_fvg
             return signal
 
-        sweep = latest_sweep_after_index(mtf, mtf_start_index, self.left, self.right)
+        sweep = latest_sweep_after_index(
+            mtf,
+            mtf_start_index,
+            self.left,
+            self.right,
+            signal_direction=trade_direction,
+        )
         if sweep is None:
             signal = self._wait(
                 symbol,
                 timeframe_set,
                 (
-                    "No trade yet: HTF FVG is respected, but no MTF liquidity sweep has formed "
+                    f"No trade yet: HTF {htf_fvg.direction} FVG creates {trade_direction} bias, "
+                    "but no aligned MTF liquidity sweep has formed "
                     f"after the HTF touch at {_fmt_time(htf_touch_time)}."
                 ),
             )
             signal.htf_fvg = htf_fvg
+            signal.direction = trade_direction
             return signal
 
         self.logger.info(
@@ -192,7 +257,6 @@ class MTFFractalIFVGStrategy:
             sweep.timestamp,
         )
 
-        trade_direction = sweep.signal_direction
         required_fvg_direction = None
         if self.require_entry_fvg_opposes_sweep:
             required_fvg_direction = "bearish" if trade_direction == "BUY" else "bullish"
@@ -370,6 +434,13 @@ class MTFFractalIFVGStrategy:
             invalid.setup_timestamp = ifvg.disrespected_at_time
             return invalid
 
+        confluence_score, confluence_total, confluence_factors = self._build_confluence_score(
+            trade_direction,
+            risk.risk_reward,
+            is_untapped_htf_fvg,
+            htf_trend,
+        )
+
         signal = StrategySignal(
             symbol=symbol,
             timeframe_set=timeframe_set.name,
@@ -390,8 +461,11 @@ class MTFFractalIFVGStrategy:
             tp1=risk.tp1,
             tp2=risk.tp2,
             risk_reward=risk.risk_reward,
+            confluence_score=confluence_score,
+            confluence_total=confluence_total,
+            confluence_factors=confluence_factors,
             reason=[
-                "HTF FVG respected.",
+                f"HTF {htf_fvg.direction} FVG respected; directional bias locked to {trade_direction}.",
                 "MTF liquidity sweep confirmed.",
                 scenario_reason,
                 f"Selected {ifvg_timeframe} FVG disrespected and converted into IFVG.",
@@ -402,6 +476,60 @@ class MTFFractalIFVGStrategy:
             setup_timestamp=ifvg.disrespected_at_time,
         )
         return signal
+
+    @staticmethod
+    def _direction_from_htf_fvg(htf_fvg: FVG) -> str:
+        return "BUY" if htf_fvg.direction == "bullish" else "SELL"
+
+    @staticmethod
+    def _is_untapped_htf_fvg(htf_df: pd.DataFrame, htf_fvg: FVG, touch_index: int | None) -> bool:
+        if touch_index is None:
+            return False
+        first_touch = htf_fvg.metadata.get("first_touched_index")
+        if first_touch is None:
+            first_touch = first_zone_touch_index(htf_df, htf_fvg, before_index=touch_index + 1)
+        return first_touch == touch_index
+
+    def _trend_direction(self, htf_df: pd.DataFrame) -> str | None:
+        if not self.trend_filter_enabled:
+            return None
+        if htf_df.empty or len(htf_df) < self.trend_slow_period:
+            return None
+
+        close = htf_df["close"].astype(float)
+        fast_ema = close.ewm(span=self.trend_fast_period, adjust=False).mean().iloc[-1]
+        slow_ema = close.ewm(span=self.trend_slow_period, adjust=False).mean().iloc[-1]
+
+        if fast_ema > slow_ema:
+            return "BUY"
+        if fast_ema < slow_ema:
+            return "SELL"
+        return None
+
+    def _build_confluence_score(
+        self,
+        trade_direction: str,
+        risk_reward: float | None,
+        is_untapped_htf_fvg: bool,
+        htf_trend: str | None,
+    ) -> tuple[int, int, list[str]]:
+        total = 1
+        factors: list[str] = []
+
+        if risk_reward is not None and risk_reward >= self.high_rr_threshold:
+            factors.append("High Risk/Reward")
+
+        if self.untapped_htf_fvg_mode not in {"off", "false", "disabled"}:
+            total += 1
+            if is_untapped_htf_fvg:
+                factors.append("Untapped HTF FVG")
+
+        if self.trend_filter_enabled:
+            total += 1
+            if htf_trend == trade_direction:
+                factors.append("HTF Trend Aligned")
+
+        return len(factors), total, factors
 
     def _attach_common(
         self,

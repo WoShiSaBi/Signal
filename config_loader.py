@@ -39,6 +39,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "log_wait_states": True,
         "log_market_data_fetch": True,
     },
+    "filters": {
+        "enforce_htf_priority": True,
+    },
     "strategy": {
         "minimum_risk_reward": 2.0,
         "candles_to_fetch": 500,
@@ -49,6 +52,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "fvg": {
             "merge_enabled": True,
             "require_entry_fvg_opposes_sweep": True,
+            "untapped_htf_fvg_mode": "bonus",
+        },
+        "trend_filter": {
+            "enabled": True,
+            "fast_period": 50,
+            "slow_period": 200,
+            "strict_requirement": False,
+        },
+        "confluence": {
+            "high_rr_threshold": 3.0,
         },
         "liquidity_sweep": {
             "enabled": True,
@@ -247,6 +260,22 @@ def validate_config(config: dict[str, Any]) -> None:
     tp2_source = str(config.get("strategy", {}).get("risk", {}).get("tp2", {}).get("source", "previous_day"))
     if tp2_source not in valid_tp2_sources:
         raise ConfigError(f"strategy.risk.tp2.source must be one of: {', '.join(sorted(valid_tp2_sources))}.")
+
+    valid_untapped_modes = {"bonus", "requirement", "require", "required", "strict", "off", "false", "disabled"}
+    untapped_mode = str(config.get("strategy", {}).get("fvg", {}).get("untapped_htf_fvg_mode", "bonus")).lower()
+    if untapped_mode not in valid_untapped_modes:
+        raise ConfigError(
+            "strategy.fvg.untapped_htf_fvg_mode must be bonus, requirement, or off."
+        )
+
+    trend = config.get("strategy", {}).get("trend_filter", {})
+    if isinstance(trend, dict):
+        fast_period = int(trend.get("fast_period", 50))
+        slow_period = int(trend.get("slow_period", 200))
+        if fast_period < 1 or slow_period < 1:
+            raise ConfigError("strategy.trend_filter fast_period and slow_period must be at least 1.")
+        if fast_period >= slow_period:
+            raise ConfigError("strategy.trend_filter.fast_period must be lower than slow_period.")
 
 
 def print_startup_config(config: dict[str, Any]) -> None:

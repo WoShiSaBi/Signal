@@ -30,6 +30,13 @@ def _fmt_time(value, timezone_name: str) -> str:
     return timestamp.astimezone(timezone).strftime("%Y-%m-%d %H:%M %Z")
 
 
+def _fmt_confluences(signal: StrategySignal) -> str:
+    if signal.confluence_total <= 0:
+        return "N/A"
+    factors = ", ".join(signal.confluence_factors) if signal.confluence_factors else "None"
+    return f"{signal.confluence_score}/{signal.confluence_total} ({factors})"
+
+
 def format_signal_message(signal: StrategySignal, timezone_name: str = "Asia/Singapore") -> str:
     htf_zone = (
         _fmt_zone(signal.htf_fvg.bottom, signal.htf_fvg.top)
@@ -86,6 +93,7 @@ Management:
 {signal.dynamic_stop_condition or "Wait for IFVG retest."}
 
 Risk/Reward: {rr}
+Confluences: {_fmt_confluences(signal)}
 {invalidation}
 Reason:
 {reason_lines}
@@ -95,7 +103,11 @@ Timestamp: {_fmt_time(signal.timestamp, timezone_name)}
 
 
 class TelegramAlert:
-    def __init__(self, enabled: bool = True, logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        enabled: bool = True,
+        logger: logging.Logger | None = None,
+    ) -> None:
         self.enabled = enabled
         self.logger = logger or logging.getLogger(__name__)
         self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -119,10 +131,19 @@ class TelegramAlert:
 
         try:
             response = requests.post(url, json=payload, timeout=15)
-            response.raise_for_status()
+            if not response.ok:
+                self.logger.error(
+                    "Telegram error: HTTP %s - %s",
+                    response.status_code,
+                    response.text,
+                )
+                return False
         except requests.RequestException as exc:
-            self.logger.error("Telegram error: %s", exc)
+            self.logger.error("Telegram request error: %s", exc.__class__.__name__)
             return False
 
         self.logger.info("Telegram alert sent at %s", datetime.utcnow().isoformat())
         return True
+
+    def send_signal(self, signal: StrategySignal, timezone_name: str = "Asia/Singapore") -> bool:
+        return self.send(format_signal_message(signal, timezone_name))

@@ -104,20 +104,47 @@ def candle_closes_beyond_zone(candle: pd.Series, fvg: FVG) -> bool:
     return close > fvg.top
 
 
+def first_zone_touch_index(df: pd.DataFrame, fvg: FVG, before_index: int | None = None) -> int | None:
+    start = max(fvg.candle_indexes) + 1
+    stop = len(df) if before_index is None else min(before_index, len(df))
+
+    for index in range(start, stop):
+        if price_enters_zone(df.iloc[index], fvg):
+            return index
+
+    return None
+
+
+def has_disrespect_close(df: pd.DataFrame, fvg: FVG, start_index: int | None = None) -> tuple[bool, int | None]:
+    start = max(fvg.candle_indexes) + 1 if start_index is None else max(start_index, 0)
+    for index in range(start, len(df)):
+        if candle_closes_beyond_zone(df.iloc[index], fvg):
+            return True, index
+    return False, None
+
+
 def is_zone_respected_after_touch(df: pd.DataFrame, fvg: FVG) -> tuple[bool, int | None]:
     start = max(fvg.candle_indexes) + 1
     touched_index: int | None = None
+    first_touched_index: int | None = None
 
     for index in range(start, len(df)):
         candle = df.iloc[index]
         if price_enters_zone(candle, fvg):
+            if first_touched_index is None:
+                first_touched_index = index
             touched_index = index
         if candle_closes_beyond_zone(candle, fvg):
             fvg.status = "invalidated"
+            fvg.metadata["invalidated_at_index"] = index
+            if first_touched_index is not None:
+                fvg.metadata["first_touched_index"] = first_touched_index
             return False, touched_index
 
     if touched_index is not None:
         fvg.status = "respected"
+        fvg.metadata["first_touched_index"] = first_touched_index
+        fvg.metadata["latest_touched_index"] = touched_index
         return True, touched_index
 
     return False, None

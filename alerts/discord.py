@@ -56,6 +56,13 @@ def _outcome_color(outcome: TradeOutcome) -> int:
     return 0x3498DB
 
 
+def _fmt_confluences(signal: StrategySignal) -> str:
+    if signal.confluence_total <= 0:
+        return "N/A"
+    factors = ", ".join(signal.confluence_factors) if signal.confluence_factors else "None"
+    return f"{signal.confluence_score}/{signal.confluence_total} ({factors})"
+
+
 def format_signal_embed(signal: StrategySignal, timezone_name: str = "Asia/Singapore") -> dict:
     rr = "N/A" if signal.risk_reward is None else f"1:{signal.risk_reward:.2f}"
     htf_zone = _fmt_zone(signal.htf_fvg.bottom, signal.htf_fvg.top) if signal.htf_fvg else "N/A"
@@ -92,7 +99,12 @@ def format_signal_embed(signal: StrategySignal, timezone_name: str = "Asia/Singa
             },
             {
                 "name": "Status",
-                "value": f"Risk/Reward: `{rr}`\nState: `Waiting for IFVG retest`\nTracking: `Armed after alert`",
+                "value": (
+                    f"Risk/Reward: `{rr}`\n"
+                    f"Confluences: `{_fmt_confluences(signal)}`\n"
+                    "State: `Waiting for IFVG retest`\n"
+                    "Tracking: `Armed after alert`"
+                ),
                 "inline": True,
             },
             {

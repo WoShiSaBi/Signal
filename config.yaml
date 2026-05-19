@@ -89,6 +89,9 @@ scanner:
   log_market_data_fetch: true
   track_trade_outcomes: true
 
+filters:
+  enforce_htf_priority: true
+
 strategy:
   candles_to_fetch: 500
   minimum_risk_reward: 2.0
@@ -100,6 +103,17 @@ strategy:
   fvg:
     merge_enabled: true
     require_entry_fvg_opposes_sweep: true
+    # bonus = add confluence point, requirement = block non-virgin HTF FVGs, off = ignore
+    untapped_htf_fvg_mode: bonus
+
+  trend_filter:
+    enabled: true
+    fast_period: 50
+    slow_period: 200
+    strict_requirement: false
+
+  confluence:
+    high_rr_threshold: 3.0
 
   liquidity_sweep:
     enabled: true

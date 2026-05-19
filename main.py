@@ -6,10 +6,9 @@ import time
 from pathlib import Path
 
 import pandas as pd
-from dotenv import load_dotenv
 
 from alerts.discord import DiscordWebhookAlert
-from alerts.telegram import TelegramAlert, format_signal_message
+from alerts.telegram import TelegramAlert
 from config_loader import (
     ConfigError,
     get_candles_to_fetch,
@@ -25,6 +24,7 @@ from data.csv_data import CSVDataProvider
 from data.mt5_data import MT5DataProvider
 from strategies.mtf_fractal_ifvg import MTFFractalIFVGStrategy, StrategySignal, TimeframeSet
 from utils.duplicate_filter import DuplicateFilter
+from utils.env import load_project_env
 from utils.logger import setup_logger
 from utils.trade_tracker import TradeTracker, format_trade_outcome_message
 from utils.time_utils import is_in_enabled_session
@@ -126,6 +126,14 @@ def should_alert(signal: StrategySignal, config: dict) -> bool:
     )
 
 
+def should_block_lower_timeframes(signal: StrategySignal) -> bool:
+    if signal.signal in {"BUY", "SELL"}:
+        return True
+    if signal.signal != "WAIT":
+        return False
+    return signal.htf_fvg is not None or signal.mtf_sweep is not None or signal.direction in {"BUY", "SELL"}
+
+
 def fetch_market_data(
     provider,
     symbol: str,
@@ -170,6 +178,7 @@ def scan_once(
     timezone_name = config.get("sessions", {}).get("timezone", "Asia/Singapore")
     daily_timeframe = str(config.get("data", {}).get("daily_timeframe", "D1"))
     log_wait_states = bool(config.get("scanner", {}).get("log_wait_states", True))
+    enforce_htf_priority = bool(config.get("filters", {}).get("enforce_htf_priority", True))
 
     for symbol in symbols:
         timeframe_sets = get_enabled_timeframe_sets(config, symbol)
@@ -178,8 +187,19 @@ def scan_once(
             continue
 
         strategy = MTFFractalIFVGStrategy(get_strategy_settings(config, symbol), logger)
+        htf_priority_blocker: StrategySignal | None = None
 
         for timeframe_set in timeframe_sets:
+            if enforce_htf_priority and htf_priority_blocker is not None:
+                logger.info(
+                    "Skipping %s %s because higher timeframe set %s has active %s state.",
+                    symbol,
+                    timeframe_set.name,
+                    htf_priority_blocker.timeframe_set,
+                    htf_priority_blocker.signal,
+                )
+                continue
+
             candles_to_fetch = get_candles_to_fetch(config, timeframe_set.name)
             bundle = fetch_market_data(provider, symbol, timeframe_set, candles_to_fetch, logger, daily_timeframe)
             if bundle is None:
@@ -239,6 +259,9 @@ def scan_once(
                     signal.risk_reward,
                 )
 
+            if enforce_htf_priority and htf_priority_blocker is None and should_block_lower_timeframes(signal):
+                htf_priority_blocker = signal
+
             if not should_alert(signal, config):
                 logger.info(
                     "Alert not sent for %s %s: %s",
@@ -256,12 +279,11 @@ def scan_once(
                 )
                 continue
 
-            message = format_signal_message(signal, timezone_name)
             sent_any = False
 
             telegram_rejection = alert_rejection_reason(signal, config.get("telegram", {}))
             if telegram_rejection is None:
-                sent_any = telegram.send(message) or sent_any
+                sent_any = telegram.send_signal(signal, timezone_name) or sent_any
             else:
                 logger.info(
                     "Telegram alert not sent for %s %s: %s",
@@ -296,7 +318,7 @@ def scan_once(
 
 
 def run_bot(config_path: str, run_once: bool = False) -> int:
-    load_dotenv()
+    load_project_env()
     logger = setup_logger("logs/bot.log")
 
     try:
