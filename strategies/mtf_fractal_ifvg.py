@@ -73,6 +73,7 @@ class StrategySignal:
     confluence_score: int = 0
     confluence_total: int = 0
     confluence_factors: list[str] = field(default_factory=list)
+    htf_priority_warning: bool = False
     timestamp: datetime = field(default_factory=datetime.utcnow)
     setup_timestamp: pd.Timestamp | None = None
 

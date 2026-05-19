@@ -77,6 +77,12 @@ def _confidence_label(signal: StrategySignal) -> str:
     return "Low RR"
 
 
+def _htf_priority_warning(signal: StrategySignal) -> str:
+    if not signal.htf_priority_warning:
+        return ""
+    return "\n⚠️ WARNING: Conflicting HTF Setup Currently Active (-1 Confluence)"
+
+
 def format_signal_message(signal: StrategySignal, timezone_name: str = "Asia/Singapore") -> str:
     htf_zone = _fmt_zone(signal.htf_fvg.bottom, signal.htf_fvg.top) if signal.htf_fvg else "N/A"
     ifvg_zone = _fmt_zone(signal.ifvg.bottom, signal.ifvg.top) if signal.ifvg else "N/A"
@@ -98,7 +104,7 @@ def format_signal_message(signal: StrategySignal, timezone_name: str = "Asia/Sin
     return f"""{icon} <b>MTF FRACTAL IFVG</b>
 <b>{_html(signal.symbol)}</b> | <b>{_html(title)}</b>
 Scenario: {_code(signal.scenario)}
-Quality: {_code(_confidence_label(signal))}
+Quality: {_code(_confidence_label(signal))}{_htf_priority_warning(signal)}
 
 📊 <b>Timeframes</b>
 HTF: {_code(signal.htf)}

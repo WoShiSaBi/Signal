@@ -126,12 +126,17 @@ def should_alert(signal: StrategySignal, config: dict) -> bool:
     )
 
 
-def should_block_lower_timeframes(signal: StrategySignal) -> bool:
+def should_warn_lower_timeframes(signal: StrategySignal) -> bool:
     if signal.signal in {"BUY", "SELL"}:
         return True
     if signal.signal != "WAIT":
         return False
     return signal.htf_fvg is not None or signal.mtf_sweep is not None or signal.direction in {"BUY", "SELL"}
+
+
+def apply_htf_priority_warning(signal: StrategySignal) -> None:
+    signal.htf_priority_warning = True
+    signal.confluence_score -= 1
 
 
 def fetch_market_data(
@@ -178,7 +183,13 @@ def scan_once(
     timezone_name = config.get("sessions", {}).get("timezone", "Asia/Singapore")
     daily_timeframe = str(config.get("data", {}).get("daily_timeframe", "D1"))
     log_wait_states = bool(config.get("scanner", {}).get("log_wait_states", True))
-    enforce_htf_priority = bool(config.get("filters", {}).get("enforce_htf_priority", True))
+    filters_config = config.get("filters", {})
+    warn_htf_priority = bool(
+        filters_config.get(
+            "warn_htf_priority",
+            filters_config.get("enforce_htf_priority", True),
+        )
+    )
 
     for symbol in symbols:
         timeframe_sets = get_enabled_timeframe_sets(config, symbol)
@@ -190,16 +201,6 @@ def scan_once(
         htf_priority_blocker: StrategySignal | None = None
 
         for timeframe_set in timeframe_sets:
-            if enforce_htf_priority and htf_priority_blocker is not None:
-                logger.info(
-                    "Skipping %s %s because higher timeframe set %s has active %s state.",
-                    symbol,
-                    timeframe_set.name,
-                    htf_priority_blocker.timeframe_set,
-                    htf_priority_blocker.signal,
-                )
-                continue
-
             candles_to_fetch = get_candles_to_fetch(config, timeframe_set.name)
             bundle = fetch_market_data(provider, symbol, timeframe_set, candles_to_fetch, logger, daily_timeframe)
             if bundle is None:
@@ -243,6 +244,16 @@ def scan_once(
 
             signal = strategy.analyze(symbol, timeframe_set, htf, mtf, ltf, daily)
 
+            if warn_htf_priority and htf_priority_blocker is not None:
+                apply_htf_priority_warning(signal)
+                logger.info(
+                    "%s %s: HTF priority warning applied because higher timeframe set %s has active %s state.",
+                    symbol,
+                    timeframe_set.name,
+                    htf_priority_blocker.timeframe_set,
+                    htf_priority_blocker.signal,
+                )
+
             if signal.signal == "WAIT":
                 if log_wait_states:
                     logger.info("%s %s: WAIT - %s", symbol, timeframe_set.name, "; ".join(signal.reason))
@@ -259,7 +270,7 @@ def scan_once(
                     signal.risk_reward,
                 )
 
-            if enforce_htf_priority and htf_priority_blocker is None and should_block_lower_timeframes(signal):
+            if warn_htf_priority and htf_priority_blocker is None and should_warn_lower_timeframes(signal):
                 htf_priority_blocker = signal
 
             if not should_alert(signal, config):

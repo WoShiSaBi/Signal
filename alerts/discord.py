@@ -63,6 +63,12 @@ def _fmt_confluences(signal: StrategySignal) -> str:
     return f"{signal.confluence_score}/{signal.confluence_total} ({factors})"
 
 
+def _htf_priority_warning(signal: StrategySignal) -> str:
+    if not signal.htf_priority_warning:
+        return ""
+    return "\n⚠️ WARNING: Conflicting HTF Setup Currently Active (-1 Confluence)"
+
+
 def format_signal_embed(signal: StrategySignal, timezone_name: str = "Asia/Singapore") -> dict:
     rr = "N/A" if signal.risk_reward is None else f"1:{signal.risk_reward:.2f}"
     htf_zone = _fmt_zone(signal.htf_fvg.bottom, signal.htf_fvg.top) if signal.htf_fvg else "N/A"
@@ -79,7 +85,7 @@ def format_signal_embed(signal: StrategySignal, timezone_name: str = "Asia/Singa
 
     return {
         "title": f"{signal.symbol} {signal.signal} Setup",
-        "description": f"{direction_label} | {_confidence_label(signal)} | {signal.scenario}",
+        "description": f"{direction_label} | {_confidence_label(signal)} | {signal.scenario}{_htf_priority_warning(signal)}",
         "color": _signal_color(signal),
         "fields": [
             {
