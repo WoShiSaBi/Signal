@@ -25,6 +25,20 @@ from strategies.risk import (
 )
 
 
+def _fmt_price(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.5f}"
+
+
+def _fmt_time(value: pd.Timestamp | None) -> str:
+    return "N/A" if value is None else str(value)
+
+
+def _fmt_zone(fvg: FVG | None) -> str:
+    if fvg is None:
+        return "N/A"
+    return f"{fvg.direction} {_fmt_price(fvg.bottom)}-{_fmt_price(fvg.top)}"
+
+
 @dataclass
 class TimeframeSet:
     name: str
@@ -117,7 +131,24 @@ class MTFFractalIFVGStrategy:
                     latest_htf_fvg.bottom,
                     latest_htf_fvg.top,
                 )
-            return self._wait(symbol, timeframe_set, "Waiting for a respected HTF FVG.")
+                return self._wait(
+                    symbol,
+                    timeframe_set,
+                    (
+                        "No trade: latest HTF FVG was invalidated instead of respected "
+                        f"({_fmt_zone(latest_htf_fvg)})."
+                    ),
+                )
+            if latest_htf_fvg:
+                return self._wait(
+                    symbol,
+                    timeframe_set,
+                    (
+                        "No trade yet: HTF FVG exists but has not been respected by a later touch "
+                        f"({_fmt_zone(latest_htf_fvg)})."
+                    ),
+                )
+            return self._wait(symbol, timeframe_set, "No trade yet: no HTF FVG was found in the fetched candles.")
 
         self.logger.info(
             "%s %s: HTF FVG detected and respected: %s %.5f-%.5f",
@@ -141,7 +172,14 @@ class MTFFractalIFVGStrategy:
 
         sweep = latest_sweep_after_index(mtf, mtf_start_index, self.left, self.right)
         if sweep is None:
-            signal = self._wait(symbol, timeframe_set, "HTF FVG respected. Waiting for MTF liquidity sweep.")
+            signal = self._wait(
+                symbol,
+                timeframe_set,
+                (
+                    "No trade yet: HTF FVG is respected, but no MTF liquidity sweep has formed "
+                    f"after the HTF touch at {_fmt_time(htf_touch_time)}."
+                ),
+            )
             signal.htf_fvg = htf_fvg
             return signal
 
@@ -179,7 +217,11 @@ class MTFFractalIFVGStrategy:
             scenario_reason = "MTF override FVG found before the sweep."
         else:
             if not self.base_ltf_enabled:
-                signal = self._wait(symbol, timeframe_set, "Base LTF strategy is disabled in config.")
+                signal = self._wait(
+                    symbol,
+                    timeframe_set,
+                    "No trade: no MTF override FVG qualified and the fallback Base LTF strategy is disabled in config.",
+                )
                 signal.htf_fvg = htf_fvg
                 signal.mtf_sweep = sweep
                 signal.direction = trade_direction
@@ -203,7 +245,24 @@ class MTFFractalIFVGStrategy:
             scenario_reason = "No MTF override FVG found. Dropped to LTF."
 
         if selected_fvg is None:
-            signal = self._wait(symbol, timeframe_set, "Waiting for a qualifying entry FVG.")
+            if scenario == "Scenario 1 MTF Override":
+                search_detail = (
+                    f"lookback={self.override_lookback} MTF candles before the sweep; "
+                    f"required direction={required_fvg_direction or 'any'}"
+                )
+            else:
+                search_detail = (
+                    f"searched {timeframe_set.ltf} candles from sweep time {sweep.timestamp}; "
+                    f"required direction={required_fvg_direction or 'any'}"
+                )
+            signal = self._wait(
+                symbol,
+                timeframe_set,
+                (
+                    "No trade yet: liquidity sweep confirmed, but no qualifying entry FVG was found "
+                    f"({search_detail})."
+                ),
+            )
             signal.htf_fvg = htf_fvg
             signal.mtf_sweep = sweep
             signal.direction = trade_direction
@@ -211,7 +270,14 @@ class MTFFractalIFVGStrategy:
             return signal
 
         if ifvg is None or disrespect_index is None:
-            signal = self._wait(symbol, timeframe_set, "Entry FVG found. Waiting for IFVG disrespect confirmation.")
+            signal = self._wait(
+                symbol,
+                timeframe_set,
+                (
+                    "No trade yet: entry FVG was found, but price has not closed through it to confirm IFVG "
+                    f"conversion for a {trade_direction} setup ({_fmt_zone(selected_fvg)})."
+                ),
+            )
             signal.htf_fvg = htf_fvg
             signal.mtf_sweep = sweep
             signal.ifvg = selected_fvg
@@ -243,7 +309,14 @@ class MTFFractalIFVGStrategy:
         disrespect_candle = trade_df.iloc[disrespect_index]
 
         if self.require_tp1 and tp1 is None:
-            invalid = self._invalid(symbol, timeframe_set, "No valid TP1 liquidity target found.")
+            invalid = self._invalid(
+                symbol,
+                timeframe_set,
+                (
+                    "No trade: IFVG confirmed, but no valid TP1 liquidity target was found beyond the entry "
+                    f"{_fmt_price(provisional_entry)}."
+                ),
+            )
             invalid.scenario = scenario
             invalid.direction = trade_direction
             invalid.htf_fvg = htf_fvg
@@ -256,7 +329,10 @@ class MTFFractalIFVGStrategy:
             invalid = self._invalid(
                 symbol,
                 timeframe_set,
-                "Scenario 3 invalidation: disrespect candle already touched nearest liquidity TP1.",
+                (
+                    "No trade: Scenario 3 invalidation. The IFVG disrespect candle already touched TP1 "
+                    f"({_fmt_price(tp1)}), so the target was reached before a clean retest entry."
+                ),
             )
             invalid.scenario = scenario
             invalid.direction = trade_direction
@@ -283,7 +359,12 @@ class MTFFractalIFVGStrategy:
             invalid = self._invalid(
                 symbol,
                 timeframe_set,
-                f"Risk/reward below minimum {self.minimum_rr:.2f}.",
+                (
+                    "No trade: risk/reward filter failed. "
+                    f"Calculated RR is {'N/A' if risk.risk_reward is None else f'1:{risk.risk_reward:.2f}'}, "
+                    f"minimum is 1:{self.minimum_rr:.2f}; entry={_fmt_price(risk.entry)}, "
+                    f"SL={_fmt_price(risk.hard_sl)}, TP1={_fmt_price(risk.tp1)}."
+                ),
             )
             self._attach_common(invalid, htf_fvg, sweep, ifvg, risk, trade_direction, scenario)
             invalid.setup_timestamp = ifvg.disrespected_at_time

@@ -87,6 +87,7 @@ scanner:
   duplicate_cooldown_minutes: 30
   log_wait_states: true
   log_market_data_fetch: true
+  track_trade_outcomes: true
 
 strategy:
   candles_to_fetch: 500

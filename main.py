@@ -26,6 +26,7 @@ from data.mt5_data import MT5DataProvider
 from strategies.mtf_fractal_ifvg import MTFFractalIFVGStrategy, StrategySignal, TimeframeSet
 from utils.duplicate_filter import DuplicateFilter
 from utils.logger import setup_logger
+from utils.trade_tracker import TradeTracker, format_trade_outcome_message
 from utils.time_utils import is_in_enabled_session
 
 
@@ -47,42 +48,75 @@ def build_data_provider(config: dict, logger: logging.Logger):
 
 
 def is_high_confidence_signal(signal: StrategySignal, channel_config: dict) -> bool:
+    return high_confidence_rejection_reason(signal, channel_config) is None
+
+
+def high_confidence_rejection_reason(signal: StrategySignal, channel_config: dict) -> str | None:
     if signal.signal not in {"BUY", "SELL"}:
-        return False
+        return f"signal is {signal.signal}, not BUY/SELL"
 
     minimum_rr = float(channel_config.get("minimum_risk_reward", 2.0))
     if signal.risk_reward is None or signal.risk_reward < minimum_rr:
-        return False
+        rr = "N/A" if signal.risk_reward is None else f"1:{signal.risk_reward:.2f}"
+        return f"risk/reward {rr} is below required 1:{minimum_rr:.2f}"
 
     if bool(channel_config.get("require_complete_trade_plan", True)):
-        required_values = [
-            signal.htf_fvg,
-            signal.mtf_sweep,
-            signal.ifvg,
-            signal.entry_price,
-            signal.hard_stop_loss,
-            signal.tp1,
-        ]
-        if any(value is None for value in required_values):
-            return False
+        required_values = {
+            "HTF FVG": signal.htf_fvg,
+            "MTF sweep": signal.mtf_sweep,
+            "IFVG": signal.ifvg,
+            "entry": signal.entry_price,
+            "hard SL": signal.hard_stop_loss,
+            "TP1": signal.tp1,
+        }
+        missing = [name for name, value in required_values.items() if value is None]
+        if missing:
+            return f"incomplete trade plan; missing {', '.join(missing)}"
 
-    return True
+    return None
+
 
 
 def should_alert_for_channel(signal: StrategySignal, channel_config: dict) -> bool:
+    return alert_rejection_reason(signal, channel_config) is None
+
+
+def alert_rejection_reason(signal: StrategySignal, channel_config: dict) -> str | None:
     if not bool(channel_config.get("enabled", False)):
-        return False
+        return "channel disabled"
 
     if bool(channel_config.get("high_confidence_only", False)):
-        return is_high_confidence_signal(signal, channel_config)
+        reason = high_confidence_rejection_reason(signal, channel_config)
+        if reason:
+            return f"high-confidence-only filter blocked it: {reason}"
+        return None
 
     if signal.signal == "WAIT":
-        return bool(channel_config.get("send_wait_alerts", False))
+        if not bool(channel_config.get("send_wait_alerts", False)):
+            return "WAIT alerts disabled"
+        return None
 
     if signal.signal == "INVALIDATED":
-        return bool(channel_config.get("send_invalidated_alerts", True))
+        if not bool(channel_config.get("send_invalidated_alerts", True)):
+            return "INVALIDATED alerts disabled"
+        return None
 
-    return signal.signal in {"BUY", "SELL"}
+    if signal.signal not in {"BUY", "SELL"}:
+        return f"unsupported signal type {signal.signal}"
+
+    return None
+
+
+def alert_rejection_summary(signal: StrategySignal, config: dict) -> str:
+    channel_names = ("telegram", "discord")
+    reasons = []
+    for name in channel_names:
+        reason = alert_rejection_reason(signal, config.get(name, {}))
+        if reason:
+            reasons.append(f"{name}: {reason}")
+        else:
+            reasons.append(f"{name}: would send")
+    return "; ".join(reasons)
 
 
 def should_alert(signal: StrategySignal, config: dict) -> bool:
@@ -125,6 +159,7 @@ def scan_once(
     telegram: TelegramAlert,
     discord: DiscordWebhookAlert,
     duplicate_filter: DuplicateFilter,
+    trade_tracker: TradeTracker,
     logger: logging.Logger,
 ) -> None:
     if not is_in_enabled_session(config):
@@ -151,6 +186,41 @@ def scan_once(
                 continue
 
             htf, mtf, ltf, daily = bundle
+            if bool(config.get("scanner", {}).get("track_trade_outcomes", True)):
+                outcomes = trade_tracker.check_outcomes(symbol, timeframe_set.name, ltf)
+                for outcome in outcomes:
+                    outcome_message = format_trade_outcome_message(outcome)
+                    outcome_message += (
+                        "\nRuntime TP Stats:\n"
+                        f"Tracked Trades: {trade_tracker.stats.tracked_trades}\n"
+                        f"Entry Fills: {trade_tracker.stats.entry_fills}\n"
+                        f"TP1 Hits: {trade_tracker.stats.tp1_hits}\n"
+                        f"TP2 Hits: {trade_tracker.stats.tp2_hits}\n"
+                    )
+                    telegram_sent = (
+                        telegram.send(outcome_message)
+                        if bool(config.get("telegram", {}).get("enabled", False))
+                        else False
+                    )
+                    discord_sent = (
+                        discord.send_trade_outcome(outcome, trade_tracker.stats, timezone_name)
+                        if bool(config.get("discord", {}).get("enabled", False))
+                        else False
+                    )
+                    logger.info(
+                        "%s %s: %s hit at %s. Runtime stats: tracked=%s, entry_fills=%s, tp1_hits=%s, tp2_hits=%s",
+                        symbol,
+                        timeframe_set.name,
+                        outcome.target_name,
+                        outcome.target_price,
+                        trade_tracker.stats.tracked_trades,
+                        trade_tracker.stats.entry_fills,
+                        trade_tracker.stats.tp1_hits,
+                        trade_tracker.stats.tp2_hits,
+                    )
+                    if not telegram_sent and not discord_sent:
+                        logger.info("Trade outcome alert was not sent because no enabled channel accepted it.")
+
             signal = strategy.analyze(symbol, timeframe_set, htf, mtf, ltf, daily)
 
             if signal.signal == "WAIT":
@@ -170,23 +240,59 @@ def scan_once(
                 )
 
             if not should_alert(signal, config):
+                logger.info(
+                    "Alert not sent for %s %s: %s",
+                    symbol,
+                    timeframe_set.name,
+                    alert_rejection_summary(signal, config),
+                )
                 continue
 
             if not duplicate_filter.should_send(signal):
-                logger.info("Duplicate or rate-limited alert skipped for %s %s", symbol, timeframe_set.name)
+                logger.info(
+                    "Alert not sent for %s %s: duplicate setup or symbol rate limit reached",
+                    symbol,
+                    timeframe_set.name,
+                )
                 continue
 
             message = format_signal_message(signal, timezone_name)
             sent_any = False
 
-            if should_alert_for_channel(signal, config.get("telegram", {})):
+            telegram_rejection = alert_rejection_reason(signal, config.get("telegram", {}))
+            if telegram_rejection is None:
                 sent_any = telegram.send(message) or sent_any
+            else:
+                logger.info(
+                    "Telegram alert not sent for %s %s: %s",
+                    symbol,
+                    timeframe_set.name,
+                    telegram_rejection,
+                )
 
-            if should_alert_for_channel(signal, config.get("discord", {})):
+            discord_rejection = alert_rejection_reason(signal, config.get("discord", {}))
+            if discord_rejection is None:
                 sent_any = discord.send_signal(signal, timezone_name) or sent_any
+            else:
+                logger.info(
+                    "Discord alert not sent for %s %s: %s",
+                    symbol,
+                    timeframe_set.name,
+                    discord_rejection,
+                )
 
             if sent_any:
                 logger.info("Alert sent for %s %s", symbol, timeframe_set.name)
+                if trade_tracker.track_signal(signal):
+                    logger.info(
+                        "Tracking trade outcome for %s %s. Runtime stats: tracked=%s, entry_fills=%s, tp1_hits=%s, tp2_hits=%s",
+                        symbol,
+                        timeframe_set.name,
+                        trade_tracker.stats.tracked_trades,
+                        trade_tracker.stats.entry_fills,
+                        trade_tracker.stats.tp1_hits,
+                        trade_tracker.stats.tp2_hits,
+                    )
 
 
 def run_bot(config_path: str, run_once: bool = False) -> int:
@@ -231,15 +337,25 @@ def run_bot(config_path: str, run_once: bool = False) -> int:
         duplicate_cooldown_minutes=int(scanner_config.get("duplicate_cooldown_minutes", 30)),
         max_alerts_per_symbol_per_hour=int(scanner_config.get("max_alerts_per_symbol_per_hour", 3)),
     )
+    trade_tracker = TradeTracker()
 
     scan_interval = int(scanner_config.get("scan_interval_seconds", 60))
 
     try:
         while True:
-            scan_once(config, provider, telegram, discord, duplicate_filter, logger)
+            scan_once(config, provider, telegram, discord, duplicate_filter, trade_tracker, logger)
             if run_once:
                 break
-            time.sleep(scan_interval)
+            
+            # --- REAL-TIME SYNC CODE ---
+            sync_interval = 300  # 300 seconds = 5 minutes
+            current_time = time.time()
+            sleep_seconds = sync_interval - (current_time % sync_interval)
+            
+            logger.info(f"Waiting {int(sleep_seconds)} seconds for the next 5-minute mark...")
+            time.sleep(sleep_seconds)
+            # ---------------------------
+            
     except KeyboardInterrupt:
         logger.info("Scanner stopped by user.")
     finally:
