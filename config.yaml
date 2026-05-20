@@ -20,10 +20,10 @@ symbols:
     enabled: true
 
   - name: GBPJPY
-    enabled: false
+    enabled: true
 
   - name: US30
-    enabled: true
+    enabled: false
 
   - name: BTCUSD
     enabled: true
@@ -33,7 +33,7 @@ symbols:
       - BTCUSDm
 
   - name: NAS100
-    enabled: true
+    enabled: false
     broker_symbol: USTEC
     aliases:
       - USTEC
@@ -66,11 +66,11 @@ timeframe_sets:
 
 telegram:
   enabled: true
-  high_confidence_only: false
+  high_confidence_only: true
   minimum_risk_reward: 2.0
   require_complete_trade_plan: true
   send_wait_alerts: false
-  send_invalidated_alerts: true
+  send_invalidated_alerts: false
 
 discord:
   enabled: true
@@ -91,14 +91,14 @@ scanner:
 
 filters:
   # When true, lower timeframe alerts are still sent but get an HTF conflict warning and -1 confluence.
-  enforce_htf_priority: true
+  warn_htf_priority: true
   # HTF-only FVG size filter. 0 disables it.
   # pip_size auto: Forex=0.0001, JPY pairs=0.01, XAU/XAG=0.1, other symbols=1.0.
   min_htf_fvg_pips: 0
   pip_size: auto
 
 strategy:
-  candles_to_fetch: 500
+  candles_to_fetch: 200
   minimum_risk_reward: 2.0
 
   pivots:
@@ -108,7 +108,7 @@ strategy:
   fvg:
     merge_enabled: true
     require_entry_fvg_opposes_sweep: true
-    # bonus = add confluence point, requirement = block non-virgin HTF FVGs, off = ignore
+    # bonus = add confluence point, off = ignore
     untapped_htf_fvg_mode: bonus
 
   trend_filter:
@@ -119,6 +119,9 @@ strategy:
 
   confluence:
     high_rr_threshold: 3.0
+    major_liquidity_sweep_bonus: true
+    untapped_htf_fvg_bonus: true
+    htf_trend_alignment_bonus: true
 
   liquidity_sweep:
     enabled: true
@@ -132,20 +135,37 @@ strategy:
       enabled: true
 
   invalidation:
-    scenario_3_enabled: true
-    minimum_rr_enabled: true
+    scenario_3_enabled: false
+    minimum_rr_enabled: false
 
   risk:
-    minimum_risk_reward: 2.0
+    minimum_risk_reward: 0.5
     entry_boundary: support_resistance
     require_tp1: true
+    sl_mode: swing_only
+    fixed_stop_pips: 100
+    risk_percent_per_trade: 1.0
+    # Use "auto" as a practical default, or override exact broker values under pip_values_by_symbol.
+    pip_value_per_lot: auto
+    pip_values_by_symbol:
+      XAUUSD: 10
+      EURUSD: 10
+      GBPUSD: 10
+      USDJPY: 10
+      US30: 1
+      NAS100: 1
+      BTCUSD: 1
+    lot_size_balances:
+      - 10000
+      - 50000
+      - 100000
 
     tp2:
       enabled: true
       source: previous_day
 
 sessions:
-  timezone: Asia/Singapore
+  timezone: America/New_York
 
   asian:
     enabled: true

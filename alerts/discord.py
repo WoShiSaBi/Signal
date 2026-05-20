@@ -65,6 +65,15 @@ def _fmt_confluences(signal: StrategySignal) -> str:
     return f"{signal.confluence_score}/{signal.confluence_total} ({factors})"
 
 
+def _fmt_lot_size(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2f}"
+
+
+def _fmt_stop_loss(signal: StrategySignal) -> str:
+    pips = "N/A" if signal.stop_loss_pips is None else f"{signal.stop_loss_pips:.1f}"
+    return f"{_fmt_price(signal.hard_stop_loss)} ({pips} Pips)"
+
+
 def _htf_priority_warning(signal: StrategySignal) -> str:
     if not signal.htf_priority_warning:
         return ""
@@ -99,9 +108,18 @@ def format_signal_embed(signal: StrategySignal, timezone_name: str = "Asia/Singa
                 "name": "Entry Plan",
                 "value": (
                     f"Entry: `{_fmt_price(signal.entry_price)}`\n"
-                    f"Hard SL: `{_fmt_price(signal.hard_stop_loss)}`\n"
+                    f"Stop Loss: `{_fmt_stop_loss(signal)}`\n"
                     f"TP1: `{_fmt_price(signal.tp1)}`\n"
                     f"TP2: `{_fmt_price(signal.tp2)}`"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "Recommended Lot Sizes (1% Risk):",
+                "value": (
+                    f"• 10k Acct: `{_fmt_lot_size(signal.lot_sizes.get('10k'))}`\n"
+                    f"• 50k Acct: `{_fmt_lot_size(signal.lot_sizes.get('50k'))}`\n"
+                    f"• 100k Acct: `{_fmt_lot_size(signal.lot_sizes.get('100k'))}`"
                 ),
                 "inline": True,
             },

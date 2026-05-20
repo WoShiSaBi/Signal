@@ -41,6 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "filters": {
         "enforce_htf_priority": True,
+        "warn_htf_priority": True,
         "min_htf_fvg_pips": 0,
         "pip_size": "auto",
     },
@@ -64,6 +65,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "confluence": {
             "high_rr_threshold": 3.0,
+            "major_liquidity_sweep_bonus": True,
+            "untapped_htf_fvg_bonus": True,
+            "htf_trend_alignment_bonus": True,
         },
         "liquidity_sweep": {
             "enabled": True,
@@ -82,13 +86,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
         },
         "invalidation": {
-            "scenario_3_enabled": True,
-            "minimum_rr_enabled": True,
+            "scenario_3_enabled": False,
+            "minimum_rr_enabled": False,
         },
         "risk": {
             "minimum_risk_reward": 2.0,
             "entry_boundary": "support_resistance",
             "require_tp1": True,
+            "sl_mode": "swing_only",
+            "fixed_stop_pips": 100,
+            "risk_percent_per_trade": 1.0,
+            "pip_value_per_lot": "auto",
+            "pip_values_by_symbol": {},
+            "lot_size_balances": [10000, 50000, 100000],
             "tp2": {
                 "enabled": True,
                 "source": "previous_day",
@@ -296,11 +306,24 @@ def validate_config(config: dict[str, Any]) -> None:
     if tp2_source not in valid_tp2_sources:
         raise ConfigError(f"strategy.risk.tp2.source must be one of: {', '.join(sorted(valid_tp2_sources))}.")
 
-    valid_untapped_modes = {"bonus", "requirement", "require", "required", "strict", "off", "false", "disabled"}
+    valid_sl_modes = {"swing_only", "fixed_100", "whichever_is_tighter"}
+    risk = config.get("strategy", {}).get("risk", {})
+    sl_mode = str(risk.get("sl_mode", "swing_only"))
+    if sl_mode not in valid_sl_modes:
+        raise ConfigError(f"strategy.risk.sl_mode must be one of: {', '.join(sorted(valid_sl_modes))}.")
+    if float(risk.get("fixed_stop_pips", 100)) <= 0:
+        raise ConfigError("strategy.risk.fixed_stop_pips must be greater than 0.")
+    if float(risk.get("risk_percent_per_trade", risk.get("risk_percent", 1.0))) <= 0:
+        raise ConfigError("strategy.risk.risk_percent_per_trade must be greater than 0.")
+    pip_value_per_lot = risk.get("pip_value_per_lot", "auto")
+    if str(pip_value_per_lot).lower() != "auto" and float(pip_value_per_lot) <= 0:
+        raise ConfigError("strategy.risk.pip_value_per_lot must be 'auto' or greater than 0.")
+
+    valid_untapped_modes = {"bonus", "off", "false", "disabled"}
     untapped_mode = str(config.get("strategy", {}).get("fvg", {}).get("untapped_htf_fvg_mode", "bonus")).lower()
     if untapped_mode not in valid_untapped_modes:
         raise ConfigError(
-            "strategy.fvg.untapped_htf_fvg_mode must be bonus, requirement, or off."
+            "strategy.fvg.untapped_htf_fvg_mode must be bonus or off."
         )
 
     trend = config.get("strategy", {}).get("trend_filter", {})

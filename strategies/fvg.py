@@ -98,10 +98,11 @@ def price_enters_zone(candle: pd.Series, fvg: FVG) -> bool:
 
 
 def candle_closes_beyond_zone(candle: pd.Series, fvg: FVG) -> bool:
+    open_price = float(candle["open"])
     close = float(candle["close"])
     if fvg.direction == "bullish":
-        return close < fvg.bottom
-    return close > fvg.top
+        return open_price < fvg.bottom and close < fvg.bottom
+    return open_price > fvg.top and close > fvg.top
 
 
 def first_zone_touch_index(df: pd.DataFrame, fvg: FVG, before_index: int | None = None) -> int | None:

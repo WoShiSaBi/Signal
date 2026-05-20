@@ -38,6 +38,15 @@ def _fmt_confluences(signal: StrategySignal) -> str:
     return f"{signal.confluence_score}/{signal.confluence_total} ({factors})"
 
 
+def _fmt_lot_size(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2f}"
+
+
+def _fmt_stop_loss(signal: StrategySignal) -> str:
+    pips = "N/A" if signal.stop_loss_pips is None else f"{signal.stop_loss_pips:.1f}"
+    return f"{_fmt_price(signal.hard_stop_loss)} ({pips} Pips)"
+
+
 def _html(value: object) -> str:
     return escape(str(value), quote=False)
 
@@ -113,9 +122,14 @@ LTF: {_code(signal.ltf)}
 
 🎯 <b>Entry Plan</b>
 Entry: {_code(_fmt_price(signal.entry_price))}
-Hard SL: {_code(_fmt_price(signal.hard_stop_loss))}
+Stop Loss: {_code(_fmt_stop_loss(signal))}
 TP1: {_code(_fmt_price(signal.tp1))}
 TP2: {_code(_fmt_price(signal.tp2))}
+
+<b>Recommended Lot Sizes (1% Risk):</b>
+• 10k Acct: {_code(_fmt_lot_size(signal.lot_sizes.get("10k")))}
+• 50k Acct: {_code(_fmt_lot_size(signal.lot_sizes.get("50k")))}
+• 100k Acct: {_code(_fmt_lot_size(signal.lot_sizes.get("100k")))}
 
 🧱 <b>Zones</b>
 HTF FVG: {_code(htf_zone)}

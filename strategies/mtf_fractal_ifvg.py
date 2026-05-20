@@ -15,6 +15,7 @@ from strategies.fvg import (
     find_latest_respected_fvg,
     first_zone_touch_index,
     has_disrespect_close,
+    price_enters_zone,
 )
 from strategies.liquidity import LiquiditySweep, latest_sweep_after_index
 from strategies.pivots import normalize_ohlc
@@ -64,6 +65,8 @@ class StrategySignal:
     ifvg: FVG | None = None
     entry_price: float | None = None
     hard_stop_loss: float | None = None
+    stop_loss_pips: float | None = None
+    lot_sizes: dict[str, float] = field(default_factory=dict)
     dynamic_stop_condition: str | None = None
     tp1: float | None = None
     tp2: float | None = None
@@ -119,6 +122,9 @@ class MTFFractalIFVGStrategy:
         self.trend_fast_period = int(self.trend_filter.get("fast_period", 50))
         self.trend_slow_period = int(self.trend_filter.get("slow_period", 200))
         self.high_rr_threshold = float(confluence.get("high_rr_threshold", 3.0)) if isinstance(confluence, dict) else 3.0
+        self.major_liquidity_bonus_enabled = bool(confluence.get("major_liquidity_sweep_bonus", True))
+        self.untapped_bonus_enabled = bool(confluence.get("untapped_htf_fvg_bonus", True))
+        self.trend_bonus_enabled = bool(confluence.get("htf_trend_alignment_bonus", True))
         self.min_htf_fvg_pips = float(filters.get("min_htf_fvg_pips", 0) or 0)
         self.pip_size_setting = filters.get("pip_size", "auto")
 
@@ -139,6 +145,8 @@ class MTFFractalIFVGStrategy:
         except ValueError as exc:
             return self._invalid(symbol, timeframe_set, f"Data error: {exc}")
 
+        # PHASE 1: HARD INVALIDATION FILTERS
+        # These checks cancel or pause the setup before any confluence or risk calculations run.
         htf_fvg, htf_touch_index = find_latest_respected_fvg(htf, self.merge_enabled)
         if htf_fvg is not None and self.min_htf_fvg_pips > 0:
             htf_fvg_pips = self._fvg_size_pips(symbol, htf_fvg)
@@ -214,6 +222,19 @@ class MTFFractalIFVGStrategy:
             htf_fvg.top,
         )
 
+        if htf_touch_index == len(htf) - 1 and price_enters_zone(htf.iloc[htf_touch_index], htf_fvg):
+            signal = self._wait(
+                symbol,
+                timeframe_set,
+                (
+                    "No trade yet: live HTF candle has entered the HTF FVG. "
+                    "Waiting for that HTF candle to close before checking lower timeframe setup."
+                ),
+            )
+            signal.htf_fvg = htf_fvg
+            signal.direction = self._direction_from_htf_fvg(htf_fvg)
+            return signal
+
         invalidated, invalidated_index = has_disrespect_close(htf, htf_fvg)
         if invalidated:
             invalid_time = pd.Timestamp(htf.iloc[invalidated_index]["time"]) if invalidated_index is not None else None
@@ -231,37 +252,16 @@ class MTFFractalIFVGStrategy:
         is_untapped_htf_fvg = self._is_untapped_htf_fvg(htf, htf_fvg, htf_touch_index)
         htf_fvg.metadata["is_untapped"] = is_untapped_htf_fvg
 
-        if self.untapped_htf_fvg_mode in {"require", "required", "strict", "requirement"} and not is_untapped_htf_fvg:
-            signal = self._wait(
-                symbol,
-                timeframe_set,
-                (
-                    "No trade: HTF FVG is not virgin/untapped before the current setup touch "
-                    f"({_fmt_zone(htf_fvg)})."
-                ),
-            )
-            signal.htf_fvg = htf_fvg
-            signal.direction = trade_direction
-            return signal
-
         htf_trend = self._trend_direction(htf)
-        if self.trend_filter_enabled and self.trend_strict_requirement and htf_trend != trade_direction:
-            signal = self._wait(
-                symbol,
-                timeframe_set,
-                (
-                    "No trade: HTF trend alignment is required, but trend is "
-                    f"{htf_trend or 'unknown'} while setup bias is {trade_direction}."
-                ),
-            )
-            signal.htf_fvg = htf_fvg
-            signal.direction = trade_direction
-            return signal
 
+        # Lower-timeframe confirmation is only reached after the hard HTF filters pass.
         mtf_start_index = None
+        ltf_start_index = None
         if htf_touch_time is not None:
             matching = mtf.index[pd.to_datetime(mtf["time"]) >= htf_touch_time].tolist()
             mtf_start_index = matching[0] if matching else None
+            ltf_matching = ltf.index[pd.to_datetime(ltf["time"]) >= htf_touch_time].tolist()
+            ltf_start_index = ltf_matching[0] if ltf_matching else None
 
         if not self.liquidity_sweep_enabled:
             signal = self._wait(symbol, timeframe_set, "Liquidity sweep confirmation is disabled in config.")
@@ -296,6 +296,13 @@ class MTFFractalIFVGStrategy:
             sweep.direction,
             sweep.swept_level,
             sweep.timestamp,
+        )
+        ltf_sweep = latest_sweep_after_index(
+            ltf,
+            ltf_start_index,
+            self.left,
+            self.right,
+            signal_direction=trade_direction,
         )
 
         required_fvg_direction = None
@@ -448,6 +455,21 @@ class MTFFractalIFVGStrategy:
             invalid.setup_timestamp = ifvg.disrespected_at_time
             return invalid
 
+        # PHASE 2: SOFT CONFLUENCE SCORING
+        # Scoring is calculated only after the setup has passed hard filters and has a valid entry trigger.
+        major_liquidity_factor = self._major_liquidity_swept(sweep, daily, trade_direction)
+        if major_liquidity_factor is None:
+            major_liquidity_factor = self._major_liquidity_swept(ltf_sweep, daily, trade_direction)
+        confluence_score, confluence_total, confluence_factors = self._build_confluence_score(
+            trade_direction,
+            major_liquidity_factor,
+            is_untapped_htf_fvg,
+            htf_trend,
+        )
+
+        # PHASE 3: RISK MANAGEMENT & POSITION SIZING
+        risk_settings = dict(self.risk_settings)
+        risk_settings["pip_value_per_lot"] = self._pip_value_per_lot(symbol)
         risk = build_risk_plan(
             trade_df,
             daily,
@@ -457,7 +479,8 @@ class MTFFractalIFVGStrategy:
             self.left,
             self.right,
             disrespect_index,
-            self.risk_settings,
+            self._pip_size(symbol),
+            risk_settings,
         )
 
         if self.minimum_rr_enabled and (risk.risk_reward is None or risk.risk_reward < self.minimum_rr):
@@ -475,13 +498,6 @@ class MTFFractalIFVGStrategy:
             invalid.setup_timestamp = ifvg.disrespected_at_time
             return invalid
 
-        confluence_score, confluence_total, confluence_factors = self._build_confluence_score(
-            trade_direction,
-            risk.risk_reward,
-            is_untapped_htf_fvg,
-            htf_trend,
-        )
-
         signal = StrategySignal(
             symbol=symbol,
             timeframe_set=timeframe_set.name,
@@ -496,8 +512,10 @@ class MTFFractalIFVGStrategy:
             ifvg=ifvg,
             entry_price=risk.entry,
             hard_stop_loss=risk.hard_sl,
+            stop_loss_pips=risk.stop_loss_pips,
+            lot_sizes=risk.lot_sizes,
             dynamic_stop_condition=(
-                "Send management alert if a candle body closes back inside or beyond the IFVG zone."
+                f"Stop loss mode: {risk.stop_loss_mode}. {risk.management}"
             ),
             tp1=risk.tp1,
             tp2=risk.tp2,
@@ -507,7 +525,7 @@ class MTFFractalIFVGStrategy:
             confluence_factors=confluence_factors,
             reason=[
                 f"HTF {htf_fvg.direction} FVG respected; directional bias locked to {trade_direction}.",
-                "MTF liquidity sweep confirmed.",
+                "MTF liquidity sweep confirmed; internal liquidity sweeps inside the HTF FVG are valid.",
                 scenario_reason,
                 f"Selected {ifvg_timeframe} FVG disrespected and converted into IFVG.",
                 "Disrespect candle did not touch TP1.",
@@ -554,6 +572,20 @@ class MTFFractalIFVGStrategy:
 
         return 1.0
 
+    def _pip_value_per_lot(self, symbol: str) -> float:
+        pip_values = self.risk_settings.get("pip_values_by_symbol", {})
+        if isinstance(pip_values, dict) and symbol in pip_values:
+            return float(pip_values[symbol])
+
+        configured = self.risk_settings.get("pip_value_per_lot", "auto")
+        if str(configured).lower() != "auto":
+            return float(configured)
+
+        normalized = "".join(character for character in symbol.upper() if character.isalnum())
+        if normalized.startswith(("US30", "NAS100", "USTEC", "BTC")):
+            return 1.0
+        return 10.0
+
     @staticmethod
     def _is_untapped_htf_fvg(htf_df: pd.DataFrame, htf_fvg: FVG, touch_index: int | None) -> bool:
         if touch_index is None:
@@ -582,27 +614,79 @@ class MTFFractalIFVGStrategy:
     def _build_confluence_score(
         self,
         trade_direction: str,
-        risk_reward: float | None,
+        major_liquidity_factor: str | None,
         is_untapped_htf_fvg: bool,
         htf_trend: str | None,
     ) -> tuple[int, int, list[str]]:
-        total = 1
+        total = 0
+        score = 0
         factors: list[str] = []
 
-        if risk_reward is not None and risk_reward >= self.high_rr_threshold:
-            factors.append("High Risk/Reward")
-
-        if self.untapped_htf_fvg_mode not in {"off", "false", "disabled"}:
+        if self.major_liquidity_bonus_enabled:
             total += 1
-            if is_untapped_htf_fvg:
-                factors.append("Untapped HTF FVG")
+            if major_liquidity_factor:
+                score += 1
+                factors.append(major_liquidity_factor)
 
-        if self.trend_filter_enabled:
+        if self.trend_bonus_enabled and self.trend_filter_enabled:
             total += 1
             if htf_trend == trade_direction:
-                factors.append("HTF Trend Aligned")
+                score += 1
+                factors.append("Trend Aligned")
 
-        return len(factors), total, factors
+        if self.untapped_bonus_enabled and self.untapped_htf_fvg_mode not in {"off", "false", "disabled"}:
+            total += 1
+            if is_untapped_htf_fvg:
+                score += 1
+                factors.append("Untapped HTF FVG")
+
+        return score, total, factors
+
+    @staticmethod
+    def _previous_week_extremes(daily_df: pd.DataFrame) -> tuple[float | None, float | None]:
+        if daily_df.empty or len(daily_df) < 8:
+            return None, None
+        ordered = daily_df.sort_values("time").copy()
+        ordered["time"] = pd.to_datetime(ordered["time"])
+        current_week = ordered.iloc[-1]["time"].to_period("W")
+        completed_previous_weeks = ordered[ordered["time"].dt.to_period("W") < current_week]
+        weekly = completed_previous_weeks.set_index("time").resample("W").agg({"high": "max", "low": "min"}).dropna()
+        if weekly.empty:
+            return None, None
+        previous_week = weekly.iloc[-1]
+        return float(previous_week["high"]), float(previous_week["low"])
+
+    def _major_liquidity_swept(
+        self,
+        sweep: LiquiditySweep | None,
+        daily_df: pd.DataFrame,
+        trade_direction: str,
+    ) -> str | None:
+        if sweep is None:
+            return None
+        if daily_df.empty or len(daily_df) < 2:
+            return None
+        ordered = daily_df.sort_values("time").reset_index(drop=True)
+        previous_day = ordered.iloc[-2]
+        levels: list[tuple[str, float]] = []
+        if trade_direction == "BUY":
+            levels.append(("PDL", float(previous_day["low"])))
+            weekly_high, weekly_low = self._previous_week_extremes(ordered)
+            if weekly_low is not None:
+                levels.append(("PWL", weekly_low))
+            for label, level in levels:
+                if sweep.sweep_low < level and sweep.sweep_close > level:
+                    return f"{label} Swept"
+            return None
+
+        levels.append(("PDH", float(previous_day["high"])))
+        weekly_high, weekly_low = self._previous_week_extremes(ordered)
+        if weekly_high is not None:
+            levels.append(("PWH", weekly_high))
+        for label, level in levels:
+            if sweep.sweep_high > level and sweep.sweep_close < level:
+                return f"{label} Swept"
+        return None
 
     def _attach_common(
         self,
@@ -621,6 +705,8 @@ class MTFFractalIFVGStrategy:
         signal.scenario = scenario
         signal.entry_price = risk.entry
         signal.hard_stop_loss = risk.hard_sl
+        signal.stop_loss_pips = risk.stop_loss_pips
+        signal.lot_sizes = risk.lot_sizes
         signal.tp1 = risk.tp1
         signal.tp2 = risk.tp2
         signal.risk_reward = risk.risk_reward
