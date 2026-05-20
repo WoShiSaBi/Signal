@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from html import escape
 import json
 from pathlib import Path
 
@@ -12,6 +13,14 @@ from strategies.mtf_fractal_ifvg import StrategySignal
 
 def _fmt_price(value: float | None) -> str:
     return "N/A" if value is None else f"{value:.5f}"
+
+
+def _html(value: object) -> str:
+    return escape(str(value), quote=False)
+
+
+def _code(value: object) -> str:
+    return f"<code>{_html(value)}</code>"
 
 
 def _signal_key(signal: StrategySignal) -> str:
@@ -56,10 +65,12 @@ class TrackedTrade:
     risk_reward: float | None
     opened_at: datetime
     setup_timestamp: pd.Timestamp | None
+    telegram_message_id: int | None = None
     entry_filled: bool = False
     entry_filled_at: pd.Timestamp | None = None
     tp1_hit: bool = False
     tp2_hit: bool = False
+    stop_loss_hit: bool = False
 
 
 @dataclass
@@ -68,6 +79,7 @@ class TradeStats:
     entry_fills: int = 0
     tp1_hits: int = 0
     tp2_hits: int = 0
+    stop_loss_hits: int = 0
 
 
 @dataclass
@@ -79,7 +91,7 @@ class TradeTracker:
     def __post_init__(self) -> None:
         self.load()
 
-    def track_signal(self, signal: StrategySignal) -> bool:
+    def track_signal(self, signal: StrategySignal, telegram_message_id: int | None = None) -> bool:
         if signal.signal not in {"BUY", "SELL"}:
             return False
         if signal.entry_price is None or signal.tp1 is None:
@@ -102,6 +114,7 @@ class TradeTracker:
             risk_reward=signal.risk_reward,
             opened_at=datetime.utcnow(),
             setup_timestamp=signal.setup_timestamp,
+            telegram_message_id=telegram_message_id,
         )
         self.stats.tracked_trades += 1
         self.save()
@@ -120,7 +133,7 @@ class TradeTracker:
 
     def _check_trade(self, trade: TrackedTrade, candles: pd.DataFrame) -> list[TradeOutcome]:
         outcomes: list[TradeOutcome] = []
-        if trade.tp1_hit and (trade.tp2 is None or trade.tp2_hit):
+        if trade.stop_loss_hit or (trade.tp1_hit and (trade.tp2 is None or trade.tp2_hit)):
             return outcomes
 
         scan = candles.copy()
@@ -141,6 +154,20 @@ class TradeTracker:
 
             if not trade.entry_filled:
                 continue
+
+            if trade.stop_loss is not None and not trade.stop_loss_hit and self._price_touched(
+                trade.direction,
+                trade.stop_loss,
+                high,
+                low,
+                "stop_loss",
+            ):
+                trade.stop_loss_hit = True
+                self.stats.stop_loss_hits += 1
+                outcomes.append(TradeOutcome(trade, "STOP LOSS", trade.stop_loss, candle_time, high, low))
+                self.active_trades.pop(trade.key, None)
+                self.save()
+                break
 
             if trade.tp1 is not None and not trade.tp1_hit and self._price_touched(
                 trade.direction,
@@ -188,6 +215,7 @@ class TradeTracker:
             entry_fills=int(stats.get("entry_fills", 0)),
             tp1_hits=int(stats.get("tp1_hits", 0)),
             tp2_hits=int(stats.get("tp2_hits", 0)),
+            stop_loss_hits=int(stats.get("stop_loss_hits", 0)),
         )
 
         active: dict[str, TrackedTrade] = {}
@@ -207,10 +235,12 @@ class TradeTracker:
                 risk_reward=self._optional_float(item.get("risk_reward")),
                 opened_at=datetime.fromisoformat(item["opened_at"]),
                 setup_timestamp=pd.Timestamp(setup_timestamp) if setup_timestamp else None,
+                telegram_message_id=self._optional_int(item.get("telegram_message_id")),
                 entry_filled=bool(item.get("entry_filled", False)),
                 entry_filled_at=pd.Timestamp(entry_filled_at) if entry_filled_at else None,
                 tp1_hit=bool(item.get("tp1_hit", False)),
                 tp2_hit=bool(item.get("tp2_hit", False)),
+                stop_loss_hit=bool(item.get("stop_loss_hit", False)),
             )
         self.active_trades = active
 
@@ -222,6 +252,7 @@ class TradeTracker:
                 "entry_fills": self.stats.entry_fills,
                 "tp1_hits": self.stats.tp1_hits,
                 "tp2_hits": self.stats.tp2_hits,
+                "stop_loss_hits": self.stats.stop_loss_hits,
             },
             "active_trades": {
                 key: {
@@ -236,10 +267,12 @@ class TradeTracker:
                     "risk_reward": trade.risk_reward,
                     "opened_at": trade.opened_at.isoformat(),
                     "setup_timestamp": str(trade.setup_timestamp) if trade.setup_timestamp is not None else None,
+                    "telegram_message_id": trade.telegram_message_id,
                     "entry_filled": trade.entry_filled,
                     "entry_filled_at": str(trade.entry_filled_at) if trade.entry_filled_at is not None else None,
                     "tp1_hit": trade.tp1_hit,
                     "tp2_hit": trade.tp2_hit,
+                    "stop_loss_hit": trade.stop_loss_hit,
                 }
                 for key, trade in self.active_trades.items()
             },
@@ -251,8 +284,14 @@ class TradeTracker:
         return None if value is None else float(value)
 
     @staticmethod
+    def _optional_int(value: object) -> int | None:
+        return None if value is None else int(value)
+
+    @staticmethod
     def _price_touched(direction: str, price: float, high: float, low: float, kind: str) -> bool:
         if kind == "entry":
+            return low <= price if direction == "BUY" else high >= price
+        if kind == "stop_loss":
             return low <= price if direction == "BUY" else high >= price
         return high >= price if direction == "BUY" else low <= price
 
@@ -260,21 +299,28 @@ class TradeTracker:
 def format_trade_outcome_message(outcome: TradeOutcome) -> str:
     trade = outcome.trade
     rr = "N/A" if trade.risk_reward is None else f"1:{trade.risk_reward:.2f}"
-    return f"""TRADE TARGET HIT
+    is_stop_loss = outcome.target_name == "STOP LOSS"
+    title = "STOP LOSS HIT" if is_stop_loss else f"{outcome.target_name} HIT"
+    status = "Trade invalidated at hard stop." if is_stop_loss else "Target reached."
+    outcome_label = "Stop Loss" if is_stop_loss else outcome.target_name
 
-Symbol: {trade.symbol}
-Signal: {trade.direction}
-Scenario: {trade.scenario}
-Timeframe Set: {trade.timeframe_set}
+    return f"""<b>{_html(title)}</b>
+<b>{_html(trade.symbol)}</b> | <b>{_html(trade.direction)}</b> | {_code(trade.timeframe_set)}
 
-Target: {outcome.target_name}
-Target Price: {_fmt_price(outcome.target_price)}
-Entry: {_fmt_price(trade.entry)}
-Hard SL: {_fmt_price(trade.stop_loss)}
-Risk/Reward: {rr}
+<b>Status:</b> {_html(status)}
+<b>Scenario:</b> {_code(trade.scenario)}
 
-Entry Filled At: {trade.entry_filled_at or "N/A"}
-Target Hit At: {outcome.hit_time}
-Hit Candle High: {_fmt_price(outcome.candle_high)}
-Hit Candle Low: {_fmt_price(outcome.candle_low)}
+<b>Levels</b>
+Entry: {_code(_fmt_price(trade.entry))}
+Hard SL: {_code(_fmt_price(trade.stop_loss))}
+TP1: {_code(_fmt_price(trade.tp1))}
+TP2: {_code(_fmt_price(trade.tp2))}
+Risk/Reward: {_code(rr)}
+
+<b>Hit Details</b>
+{_html(outcome_label)}: {_code(_fmt_price(outcome.target_price))}
+Entry Filled: {_code(trade.entry_filled_at or "N/A")}
+Hit Time: {_code(outcome.hit_time)}
+Candle High: {_code(_fmt_price(outcome.candle_high))}
+Candle Low: {_code(_fmt_price(outcome.candle_low))}
 """

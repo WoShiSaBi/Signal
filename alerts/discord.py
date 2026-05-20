@@ -51,6 +51,8 @@ def _signal_color(signal: StrategySignal) -> int:
 
 
 def _outcome_color(outcome: TradeOutcome) -> int:
+    if outcome.target_name == "STOP LOSS":
+        return 0xE74C3C
     if outcome.target_name == "TP2":
         return 0xF1C40F
     return 0x3498DB
@@ -151,7 +153,7 @@ def format_trade_outcome_embed(
 
     return {
         "title": f"{trade.symbol} {outcome.target_name} Hit",
-        "description": f"{direction_label} trade target reached | {trade.scenario}",
+        "description": f"{direction_label} trade outcome reached | {trade.scenario}",
         "color": _outcome_color(outcome),
         "fields": [
             {
@@ -187,7 +189,8 @@ def format_trade_outcome_embed(
                     f"Tracked: `{stats.tracked_trades}`\n"
                     f"Entry fills: `{stats.entry_fills}`\n"
                     f"TP1 hits: `{stats.tp1_hits}`\n"
-                    f"TP2 hits: `{stats.tp2_hits}`"
+                    f"TP2 hits: `{stats.tp2_hits}`\n"
+                    f"Stop loss hits: `{stats.stop_loss_hits}`"
                 ),
                 "inline": False,
             },

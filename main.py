@@ -212,14 +212,19 @@ def scan_once(
                 for outcome in outcomes:
                     outcome_message = format_trade_outcome_message(outcome)
                     outcome_message += (
-                        "\nRuntime TP Stats:\n"
+                        "\nSession Stats\n"
                         f"Tracked Trades: {trade_tracker.stats.tracked_trades}\n"
                         f"Entry Fills: {trade_tracker.stats.entry_fills}\n"
                         f"TP1 Hits: {trade_tracker.stats.tp1_hits}\n"
                         f"TP2 Hits: {trade_tracker.stats.tp2_hits}\n"
+                        f"Stop Loss Hits: {trade_tracker.stats.stop_loss_hits}\n"
                     )
                     telegram_sent = (
-                        telegram.send(outcome_message)
+                        telegram.send(
+                            outcome_message,
+                            parse_mode="HTML",
+                            reply_to_message_id=outcome.trade.telegram_message_id,
+                        )
                         if bool(config.get("telegram", {}).get("enabled", False))
                         else False
                     )
@@ -229,7 +234,7 @@ def scan_once(
                         else False
                     )
                     logger.info(
-                        "%s %s: %s hit at %s. Runtime stats: tracked=%s, entry_fills=%s, tp1_hits=%s, tp2_hits=%s",
+                        "%s %s: %s hit at %s. Runtime stats: tracked=%s, entry_fills=%s, tp1_hits=%s, tp2_hits=%s, stop_loss_hits=%s",
                         symbol,
                         timeframe_set.name,
                         outcome.target_name,
@@ -238,6 +243,7 @@ def scan_once(
                         trade_tracker.stats.entry_fills,
                         trade_tracker.stats.tp1_hits,
                         trade_tracker.stats.tp2_hits,
+                        trade_tracker.stats.stop_loss_hits,
                     )
                     if not telegram_sent and not discord_sent:
                         logger.info("Trade outcome alert was not sent because no enabled channel accepted it.")
@@ -291,10 +297,14 @@ def scan_once(
                 continue
 
             sent_any = False
+            telegram_message_id: int | None = None
 
             telegram_rejection = alert_rejection_reason(signal, config.get("telegram", {}))
             if telegram_rejection is None:
-                sent_any = telegram.send_signal(signal, timezone_name) or sent_any
+                telegram_sent = telegram.send_signal(signal, timezone_name)
+                if telegram_sent:
+                    telegram_message_id = telegram.last_message_id
+                sent_any = telegram_sent or sent_any
             else:
                 logger.info(
                     "Telegram alert not sent for %s %s: %s",
@@ -316,15 +326,16 @@ def scan_once(
 
             if sent_any:
                 logger.info("Alert sent for %s %s", symbol, timeframe_set.name)
-                if trade_tracker.track_signal(signal):
+                if trade_tracker.track_signal(signal, telegram_message_id):
                     logger.info(
-                        "Tracking trade outcome for %s %s. Runtime stats: tracked=%s, entry_fills=%s, tp1_hits=%s, tp2_hits=%s",
+                        "Tracking trade outcome for %s %s. Runtime stats: tracked=%s, entry_fills=%s, tp1_hits=%s, tp2_hits=%s, stop_loss_hits=%s",
                         symbol,
                         timeframe_set.name,
                         trade_tracker.stats.tracked_trades,
                         trade_tracker.stats.entry_fills,
                         trade_tracker.stats.tp1_hits,
                         trade_tracker.stats.tp2_hits,
+                        trade_tracker.stats.stop_loss_hits,
                     )
 
 

@@ -151,8 +151,15 @@ class TelegramAlert:
         self.logger = logger or logging.getLogger(__name__)
         self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+        self.last_message_id: int | None = None
 
-    def send(self, message: str, parse_mode: str | None = None) -> bool:
+    def send(
+        self,
+        message: str,
+        parse_mode: str | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> bool:
+        self.last_message_id = None
         if not self.enabled:
             self.logger.info("Telegram disabled. Message not sent.")
             return False
@@ -169,6 +176,11 @@ class TelegramAlert:
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_to_message_id is not None:
+            payload["reply_parameters"] = {
+                "message_id": reply_to_message_id,
+                "allow_sending_without_reply": True,
+            }
 
         try:
             response = requests.post(url, json=payload, timeout=15)
@@ -179,8 +191,13 @@ class TelegramAlert:
                     response.text,
                 )
                 return False
+            response_data = response.json()
+            self.last_message_id = response_data.get("result", {}).get("message_id")
         except requests.RequestException as exc:
             self.logger.error("Telegram request error: %s", exc.__class__.__name__)
+            return False
+        except ValueError:
+            self.logger.error("Telegram response was not valid JSON.")
             return False
 
         self.logger.info("Telegram alert sent at %s", datetime.utcnow().isoformat())
